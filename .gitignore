@@ -1,0 +1,31 @@
+# Environments
+venv/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Tools & Binaries
+# Assuming we want to ignore the downloaded ffmpeg binaries but keep the wrapper scripts if any
+tools/ffmpeg/ffmpeg
+tools/ffmpeg/ffprobe
+tools/ffmpeg/qt-faststart
+tools/ffmpeg/*.txt
+tools/ffmpeg/manpages/
+tools/ffmpeg/model/
+
+# Models
+models/
+
+# Temporary files
+temp_workspace/
+*.wav
+*.srt

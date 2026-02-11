@@ -1,0 +1,18 @@
+# -------------------------------------------------------------------------
+# ROCm / PyTorch Dependencies (Manual Installation Required)
+# -------------------------------------------------------------------------
+# This project uses a custom build of PyTorch and Triton for AMD ROCm 7.2.0.
+# These are NOT available on PyPI and must be installed from local wheels
+# or a specific index before installing the other requirements.
+#
+# Check README.md for details.
+#
+# torch==2.9.1+rocm7.2.0.lw.git7e1940d4
+# triton==3.5.1+rocm7.2.0.gita272dfa8
+
+# Core Dependencies
+openai-whisper==20250625  # Requires torch and triton
+pysrt==1.1.2
+requests==2.32.5
+tqdm==4.67.3
+python-dotenv==1.2.1
