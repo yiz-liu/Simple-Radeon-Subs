@@ -90,8 +90,8 @@ class BaseTranslator(ABC):
         input_path: Path,
         output_path: Path,
         target_lang: str = "Chinese",
-        batch_size: int = 30,
-        workers: int = 10,
+        batch_size: int = 128,
+        workers: int = 16,
     ):
         """Orchestrates the entire translation process."""
         subs = self.load_subtitles(input_path)
@@ -131,7 +131,7 @@ class BaseTranslator(ABC):
             f"1. **Alignment**: Output exactly {count} lines, one per line, no numbering. "
             f"Line N maps to Input N. Use `[SKIP]` as a placeholder for any skipped line.\n"
             f"2. **Skip Fillers**: Output `[SKIP]` for lines that are pure non-linguistic "
-            f"vocalizations or interjections with no translatable meaning (e.g. \"hmm\", \"ugh\", \"うー\").\n"
+            f'vocalizations or interjections with no translatable meaning (e.g. "hmm", "ugh", "うー").\n'
             f"3. **Skip Garbage**: Output `[SKIP]` for lines that are garbled or hallucinated "
             f"(incoherent mix of scripts/languages, random characters with no linguistic meaning).\n"
             f"4. **No Extras**: Output only the translated text. No explanations, notes, or original text."
@@ -158,8 +158,9 @@ class GeminiTranslator(BaseTranslator):
         prompt = (
             f"You are a professional movie subtitle translator. "
             f"Translate the following {count} subtitle segments into {target_lang}.\n\n"
-            + self._build_rules(count) + "\n\n"
-            + "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
+            + self._build_rules(count)
+            + "\n\n"
+            + "\n".join([f"[{idx + 1}] {t}" for idx, t in enumerate(texts)])
         )
 
         headers = {"Content-Type": "application/json"}
@@ -246,7 +247,7 @@ class OpenAITranslator(BaseTranslator):
             + self._build_rules(count)
         )
 
-        user_prompt = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
+        user_prompt = "\n".join([f"[{idx + 1}] {t}" for idx, t in enumerate(texts)])
 
         headers = {
             "Content-Type": "application/json",
@@ -339,14 +340,14 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=30,
-        help="Lines per HTTP Request (Context window size). Default: 30.",
+        default=128,
+        help="Lines per HTTP Request (Context window size). Default: 128.",
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=10,
-        help="Number of parallel requests. Default: 10.",
+        default=16,
+        help="Number of parallel requests. Default: 16.",
     )
     parser.add_argument("--lang", default="Chinese", help="Target language.")
     parser.add_argument(
