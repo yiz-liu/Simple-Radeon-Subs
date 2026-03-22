@@ -2,6 +2,9 @@
 venv/
 .env
 
+# Sisyphus (AI agent workspace)
+.sisyphus/
+
 # Python
 __pycache__/
 *.py[cod]

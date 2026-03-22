@@ -316,6 +316,134 @@ class OpenAITranslator(BaseTranslator):
             return {"id": chunk_id, "lines": [f"[PARSE ERROR] {t}" for t in texts]}
 
 
+class VLLMTranslator(BaseTranslator):
+    """Uses vLLM offline batch inference to translate subtitle segments locally.
+
+    Loads the model lazily inside translate_srt() to allow GPU memory to be
+    freed between Whisper transcription and translation steps.
+    """
+
+    def __init__(self, model_path: str):
+        self.model_path = Path(model_path)
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"vLLM model not found: {model_path}")
+
+    def translate_chunk(
+        self, chunk_id: int, texts: List[str], target_lang: str
+    ) -> Dict:
+        raise NotImplementedError(
+            "VLLMTranslator uses offline batch inference. Call translate_srt() directly."
+        )
+
+    def translate_srt(
+        self,
+        input_path: Path,
+        output_path: Path,
+        target_lang: str = "Chinese",
+        batch_size: int = 128,
+        workers: int = 16,
+    ):
+        """Translates all subtitles in one offline batch using vLLM LLM.chat()."""
+        subs = self.load_subtitles(input_path)
+
+        if len(subs) == 0:
+            logger.warning("No subtitles found to translate.")
+            subs.save(str(output_path), encoding="utf-8")
+            return
+
+        # Build one conversation per subtitle line
+        conversations = []
+        for sub in subs:
+            text = sub.text.replace("\n", " ")
+            system_prompt = (
+                f"You are a professional movie subtitle translator. "
+                f"Translate the following subtitle segment into {target_lang}.\n\n"
+                + self._build_rules(1)
+            )
+            conversations.append(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"[1] {text}"},
+                ]
+            )
+
+        logger.info(
+            "Translating %d segments via vLLM offline batch (model: %s).",
+            len(subs),
+            self.model_path.name,
+        )
+
+        # Lazy LLM construction — GPU memory only used from here
+        from vllm import LLM, SamplingParams  # noqa: PLC0415
+
+        llm = LLM(
+            model=str(self.model_path),
+            dtype="float16",
+            gpu_memory_utilization=0.6,
+            max_model_len=4096,
+            max_num_seqs=16,
+            enforce_eager=True,
+            enable_prefix_caching=True,
+        )
+        sampling_params = SamplingParams(
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            presence_penalty=1.5,
+            max_tokens=256,
+            skip_special_tokens=True,
+        )
+
+        try:
+            outputs = llm.chat(
+                conversations,
+                sampling_params=sampling_params,
+                chat_template_kwargs={"enable_thinking": False},
+                use_tqdm=True,
+            )
+        finally:
+            # Always free GPU memory even if inference fails
+            del llm
+            import gc  # noqa: PLC0415
+
+            gc.collect()
+            try:
+                import torch  # noqa: PLC0415
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        # Extract and clean translations
+        translated_lines = []
+        for i, output in enumerate(outputs):
+            text = output.outputs[0].text.strip()
+            if output.outputs[0].finish_reason == "length":
+                logger.warning("Subtitle %d truncated (hit max_tokens limit)", i + 1)
+            # Defensive: strip any thinking tokens that leaked through
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            # Clean numbering artifacts (e.g. "[1] " prefix from prompt)
+            clean_text = re.sub(r"^\[?\d+\]?\s*:?\s*", "", text)
+            if clean_text.strip().upper() in ("[SKIP]", "SKIP"):
+                translated_lines.append("")
+            else:
+                translated_lines.append(clean_text)
+
+        # Apply translations to subtitle objects in-place
+        for i, sub in enumerate(subs):
+            if i < len(translated_lines):
+                sub.text = translated_lines[i]
+
+        # Filter empty, re-index, save (same pattern as BaseTranslator.translate_srt)
+        non_empty_items = [sub for sub in subs if sub.text.strip()]
+        for i, sub in enumerate(non_empty_items, 1):
+            sub.index = i
+        clean_subs = pysrt.SubRipFile(items=non_empty_items)
+
+        logger.info("Saving to %s...", output_path.name)
+        clean_subs.save(str(output_path), encoding="utf-8")
+
+
 def create_translator(provider: str | None = None) -> BaseTranslator:
     """Factory function to create translator based on provider."""
     provider = provider or TRANSLATION_PROVIDER
