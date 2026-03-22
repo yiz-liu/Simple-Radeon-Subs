@@ -116,8 +116,26 @@ class BaseTranslator(ABC):
 
         self.reassemble_subtitles(subs, translated_map)
 
+        non_empty_items = [sub for sub in subs if sub.text.strip()]
+        for i, sub in enumerate(non_empty_items, 1):
+            sub.index = i
+        clean_subs = pysrt.SubRipFile(items=non_empty_items)
+
         logger.info("Saving to %s...", output_path.name)
-        subs.save(str(output_path), encoding="utf-8")
+        clean_subs.save(str(output_path), encoding="utf-8")
+
+    def _build_rules(self, count: int) -> str:
+        """Builds the shared translation rules prompt fragment."""
+        return (
+            f"**Rules:**\n"
+            f"1. **Alignment**: Output exactly {count} lines, one per line, no numbering. "
+            f"Line N maps to Input N. Use `[SKIP]` as a placeholder for any skipped line.\n"
+            f"2. **Skip Fillers**: Output `[SKIP]` for lines that are pure non-linguistic "
+            f"vocalizations or interjections with no translatable meaning (e.g. \"hmm\", \"ugh\", \"うー\").\n"
+            f"3. **Skip Garbage**: Output `[SKIP]` for lines that are garbled or hallucinated "
+            f"(incoherent mix of scripts/languages, random characters with no linguistic meaning).\n"
+            f"4. **No Extras**: Output only the translated text. No explanations, notes, or original text."
+        )
 
 
 class GeminiTranslator(BaseTranslator):
@@ -138,13 +156,9 @@ class GeminiTranslator(BaseTranslator):
 
         count = len(texts)
         prompt = (
-            f"You are a professional movie subtitle translator.\n"
-            f"Translate the following {count} subtitle segments into {target_lang}.\n"
-            f"**Important Rules:**\n"
-            f"1. **Fix ASR Errors**: If the source text has repetition (e.g. 'no no no no'), translate it naturally (e.g. '不'). Ignore hallucinated metadata.\n"
-            f"2. **Strict Alignment**: Output exactly {count} lines. Line N must correspond to Input N.\n"
-            f"3. **No Bullshit**: Ignore those non-sense words.\n"
-            f"4. **No Extras**: Do not include explanations, notes, or the original text.\n\n"
+            f"You are a professional movie subtitle translator. "
+            f"Translate the following {count} subtitle segments into {target_lang}.\n\n"
+            + self._build_rules(count) + "\n\n"
             + "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
         )
 
@@ -191,7 +205,10 @@ class GeminiTranslator(BaseTranslator):
                 if not line:
                     continue
                 clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
-                translated_lines.append(clean_line)
+                if clean_line.strip().upper() in ("[SKIP]", "SKIP"):
+                    translated_lines.append("")
+                else:
+                    translated_lines.append(clean_line)
 
             if len(translated_lines) < count:
                 translated_lines += [""] * (count - len(translated_lines))
@@ -224,14 +241,9 @@ class OpenAITranslator(BaseTranslator):
 
         count = len(texts)
         system_prompt = (
-            "You are a professional movie subtitle translator.\n"
-            f"Translate subtitle segments into {target_lang}.\n"
-            "**Important Rules:**\n"
-            "1. **Fix ASR Errors**: If the source text has repetition (e.g. 'no no no no'), translate it naturally. Ignore hallucinated metadata.\n"
-            "2. **Strict Alignment**: Output exactly the same number of lines as input. Line N must correspond to Input N.\n"
-            "3. **No Bullshit**: Ignore nonsensical words.\n"
-            "4. **No Extras**: Do not include explanations, notes, or the original text.\n"
-            "5. **Format**: Output only the translated lines, one per line, without numbering."
+            f"You are a professional movie subtitle translator. "
+            f"Translate subtitle segments into {target_lang}.\n\n"
+            + self._build_rules(count)
         )
 
         user_prompt = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
@@ -285,7 +297,10 @@ class OpenAITranslator(BaseTranslator):
                 if not line:
                     continue
                 clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
-                translated_lines.append(clean_line)
+                if clean_line.strip().upper() in ("[SKIP]", "SKIP"):
+                    translated_lines.append("")
+                else:
+                    translated_lines.append(clean_line)
 
             if len(translated_lines) < count:
                 translated_lines += [""] * (count - len(translated_lines))
