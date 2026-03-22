@@ -111,8 +111,6 @@ def process_video(
             input_path=cleaned_srt_path,
             output_path=final_srt_path,
             target_lang=target_lang,
-            batch_size=30,
-            workers=10,
         )
 
         elapsed = time.time() - start_time
@@ -140,7 +138,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="End-to-End Movie Subtitle Translator Pipeline."
     )
-    parser.add_argument("input", help="Path to the input video/audio file or directory.")
+    parser.add_argument(
+        "input", help="Path to the input video/audio file or directory."
+    )
     parser.add_argument(
         "-o",
         "--output-dir",
