@@ -1,7 +1,9 @@
 import argparse
+import gc
 import sys
 import tempfile
 import time
+import torch
 from pathlib import Path
 from typing import List, Optional
 
@@ -92,6 +94,12 @@ def process_video(
             audio_path, output_dir=temp_dir, language=src_lang, verbose=True
         )
 
+        # Free GPU memory from Whisper before potential vLLM translation
+        del transcriber
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("GPU memory released after transcription.")
+
         # =================================================================
         # Step 3: Clean & Merge
         # =================================================================
@@ -166,7 +174,7 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["gemini", "openai"],
+        choices=["gemini", "openai", "vllm"],
         default=None,
         help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
     )

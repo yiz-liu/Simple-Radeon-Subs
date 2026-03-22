@@ -453,6 +453,11 @@ def create_translator(provider: str | None = None) -> BaseTranslator:
             raise ValueError("OPENAI_API_KEY is not set in .env")
         logger.info("Using OpenAI-compatible translator (model: %s)", OPENAI_MODEL_ID)
         return OpenAITranslator(OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL_ID)
+    elif provider == "vllm":
+        if not VLLM_MODEL_PATH:
+            raise ValueError("VLLM_MODEL_PATH is not set in .env")
+        logger.info("Using vLLM offline translator (model: %s)", VLLM_MODEL_PATH)
+        return VLLMTranslator(VLLM_MODEL_PATH)
     else:
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in .env")
@@ -481,7 +486,7 @@ def main():
     parser.add_argument("--lang", default="Chinese", help="Target language.")
     parser.add_argument(
         "--provider",
-        choices=["gemini", "openai"],
+        choices=["gemini", "openai", "vllm"],
         default=None,
         help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
     )
