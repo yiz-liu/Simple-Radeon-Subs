@@ -59,26 +59,65 @@ def is_garbage(text: str) -> bool:
     return False
 
 
-def merge_consecutive_duplicates(
+def is_filler(text: str) -> bool:
+    """Detects low-information filler text using structure signals only. Language-agnostic."""
+    # Strip non-word characters (punctuation, symbols, spaces), keep unicode word chars
+    stripped = re.sub(r'[^\w]', '', text, flags=re.UNICODE).replace('_', '')
+    if not stripped:
+        return True
+    # Rule A: effective char count <= 1
+    if len(stripped) <= 1:
+        return True
+    # Rule B: all characters identical (e.g. "ああ", "ooo", "!!!")
+    if len(set(stripped)) == 1:
+        return True
+    # Rule C: multi-word but all words identical (e.g. "no no no", "you you you")
+    words = text.strip().split()
+    if len(words) >= 2 and len(set(w.lower() for w in words)) == 1:
+        return True
+    return False
+
+
+def is_duration_anomaly(sub: pysrt.SubRipItem) -> bool:
+    """Detects segments with implausibly low speech density (long duration, tiny text)."""
+    duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
+    if duration <= 0:
+        return True
+    chars = len(sub.text.strip())
+    if duration > 5.0 and chars / duration < 0.5:
+        return True
+    return False
+
+
+def filter_consecutive_duplicates(
     subs: List[pysrt.SubRipItem],
+    discard_threshold: int = 3,
 ) -> List[pysrt.SubRipItem]:
-    """Merges consecutive subtitles with identical text."""
+    """
+    Handles consecutive duplicate subtitles:
+    - run >= discard_threshold: discard entirely (non-linguistic filler)
+    - run == 2: merge into one extended entry
+    - run == 1: keep as-is
+    """
     if not subs:
         return []
-
-    merged = [subs[0]]
-
-    for current in subs[1:]:
-        last = merged[-1]
-
-        # Normalize for comparison
-        if current.text.strip() == last.text.strip():
-            # Extend the duration of the last subtitle
-            last.end = current.end
+    result = []
+    i = 0
+    while i < len(subs):
+        j = i + 1
+        while j < len(subs) and subs[j].text.strip() == subs[i].text.strip():
+            j += 1
+        run_length = j - i
+        if run_length >= discard_threshold:
+            pass  # discard entire run
+        elif run_length == 2:
+            merged = subs[i]
+            merged.end = subs[j - 1].end
+            result.append(merged)
         else:
-            merged.append(current)
-
-    return merged
+            result.append(subs[i])
+        i = j
+    return result
 
 
 def clean_srt(file_path: Path, output_path: Optional[Path] = None):
@@ -90,31 +129,39 @@ def clean_srt(file_path: Path, output_path: Optional[Path] = None):
 
     original_count = len(subs)
 
-    # 1. Clean Text & Filter Garbage with progress bar
+    # Step 1: Clean text, filter garbage and filler
     cleaned_subs = []
     for sub in tqdm(subs, desc="Cleaning", unit="line"):
         cleaned_text = clean_text(sub.text)
-        if not is_garbage(cleaned_text):
-            sub.text = cleaned_text
-            cleaned_subs.append(sub)
+        if is_garbage(cleaned_text) or is_filler(cleaned_text):
+            continue
+        sub.text = cleaned_text
+        cleaned_subs.append(sub)
 
-    count_after_filter = len(cleaned_subs)
+    count_after_text = len(cleaned_subs)
 
-    # 2. Merge Duplicates
-    final_subs = merge_consecutive_duplicates(cleaned_subs)
+    # Step 2: Duration anomaly filter
+    duration_filtered = [
+        sub for sub in cleaned_subs if not is_duration_anomaly(sub)
+    ]
+    count_after_duration = len(duration_filtered)
 
-    # Re-index
+    # Step 3: Filter consecutive duplicates
+    final_subs = filter_consecutive_duplicates(duration_filtered)
+
+    # Step 4: Re-index
     for i, sub in enumerate(final_subs):
         sub.index = i + 1
 
-    # Save
+    # Step 5: Save
     out_file = output_path or file_path
     pysrt.SubRipFile(items=final_subs).save(str(out_file), encoding="utf-8")
 
     logger.info(
-        "Result: %d -> %d (filtered) -> %d (merged) lines.",
+        "Result: %d -> %d (text filter) -> %d (duration filter) -> %d (dedup) lines.",
         original_count,
-        count_after_filter,
+        count_after_text,
+        count_after_duration,
         len(final_subs),
     )
 
