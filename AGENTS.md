@@ -8,7 +8,7 @@ Movie subtitle translation tool using OpenAI Whisper (transcription) and Google 
 Before executing any commands, please:
 
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
 ### Running the Application
@@ -44,8 +44,8 @@ python -m src.translate /path/to/subs.srt -o translated.srt --lang Chinese
 ### Environment Setup
 ```bash
 # Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install ROCm-specific PyTorch (REQUIRED - do NOT use PyPI)
 pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cw312-cw312-linux_x86_64.whl
