@@ -7,10 +7,10 @@ from typing import List, Optional
 
 from src.audio import AudioExtractor
 from src.clean import clean_srt
-from src.config import GEMINI_API_KEY, GEMINI_API_URL
+from src.config import TRANSLATION_PROVIDER
 from src.logger import logger
 from src.transcribe import Transcriber
-from src.translate import GeminiTranslator
+from src.translate import create_translator
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -37,6 +37,7 @@ def process_video(
     src_lang: Optional[str],
     model_name: str,
     keep_temp: bool,
+    provider: Optional[str] = None,
 ):
     """
     Processes a single video file: Extract -> Transcribe -> Clean -> Translate.
@@ -105,10 +106,10 @@ def process_video(
         # =================================================================
         logger.info("[%s] Step 4: Translate to %s", base_name, target_lang)
 
-        translator = GeminiTranslator(GEMINI_API_KEY, GEMINI_API_URL)
+        translator = create_translator(provider)
         translator.translate_srt(
             input_path=cleaned_srt_path,
-            output_path=final_srt_path,  # Write directly to final destination
+            output_path=final_srt_path,
             target_lang=target_lang,
             batch_size=30,
             workers=10,
@@ -163,6 +164,12 @@ def main():
     parser.add_argument(
         "--keep-temp", action="store_true", help="Keep temporary files for debugging."
     )
+    parser.add_argument(
+        "--provider",
+        choices=["gemini", "openai"],
+        default=None,
+        help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
+    )
 
     args = parser.parse_args()
 
@@ -199,6 +206,7 @@ def main():
             src_lang=args.src_lang,
             model_name=args.model,
             keep_temp=args.keep_temp,
+            provider=args.provider,
         )
 
     logger.info("All tasks completed.")

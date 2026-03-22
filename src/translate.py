@@ -1,6 +1,7 @@
 import argparse
 import re
 import time
+from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List
@@ -9,97 +10,26 @@ import pysrt
 import requests
 from tqdm import tqdm
 
-from src.config import GEMINI_API_KEY, GEMINI_API_URL
+from src.config import (
+    GEMINI_API_KEY,
+    GEMINI_API_URL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL_ID,
+    TRANSLATION_PROVIDER,
+)
 from src.logger import logger
 
 
-class GeminiTranslator:
-    """Uses Google Gemini API to translate subtitle segments concurrently."""
+class BaseTranslator(ABC):
+    """Abstract base class for subtitle translators."""
 
-    def __init__(self, api_key: str, api_url: str):
-        self.api_key = api_key
-        self.api_url = api_url
-
+    @abstractmethod
     def translate_chunk(
-        self, chunk_id: int, texts: List[str], target_lang: str = "Chinese"
+        self, chunk_id: int, texts: List[str], target_lang: str
     ) -> Dict:
-        """
-        Translates a single chunk of subtitles.
-        Returns a dict with 'id' and 'lines' to allow re-ordering.
-        """
-        if not texts:
-            return {"id": chunk_id, "lines": []}
-
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not set in .env")
-
-        count = len(texts)
-        prompt = (
-            f"You are a professional movie subtitle translator.\n"
-            f"Translate the following {count} subtitle segments into {target_lang}.\n"
-            f"**Important Rules:**\n"
-            f"1. **Fix ASR Errors**: If the source text has repetition (e.g. 'no no no no'), translate it naturally (e.g. '不'). Ignore hallucinated metadata.\n"
-            f"2. **Strict Alignment**: Output exactly {count} lines. Line N must correspond to Input N.\n"
-            f"3. **No Bullshit**: Ignore those non-sense words.\n"
-            f"4. **No Extras**: Do not include explanations, notes, or the original text.\n\n"
-            + "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
-        )
-
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2},
-        }
-
-        url = f"{self.api_url}?key={self.api_key}"
-
-        max_retries = 5
-        base_delay = 2
-        response = None
-
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=60)
-                if response.status_code in [429, 500, 502, 503, 504]:
-                    response.raise_for_status()
-                response.raise_for_status()
-                break
-            except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1:
-                    logger.error("Chunk %d failed: %s", chunk_id, e)
-                    return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
-                time.sleep(base_delay * (2**attempt))
-
-        try:
-            data = response.json()
-            # Safety check for empty/malformed response
-            if "candidates" not in data or not data["candidates"]:
-                return {"id": chunk_id, "lines": [f"[API ERROR] {t}" for t in texts]}
-
-            part = data["candidates"][0]["content"]["parts"][0]
-            translated_text = part.get("text", "").strip()
-
-            lines = translated_text.splitlines()
-            translated_lines = []
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                # Remove index markers like "[1]" or "1."
-                clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
-                translated_lines.append(clean_line)
-
-            # Pad or truncate to match input count
-            if len(translated_lines) < count:
-                translated_lines += [""] * (count - len(translated_lines))
-            elif len(translated_lines) > count:
-                translated_lines = translated_lines[:count]
-
-            return {"id": chunk_id, "lines": translated_lines}
-
-        except Exception as e:
-            logger.error("Chunk %d parsing error: %s", chunk_id, e)
-            return {"id": chunk_id, "lines": [f"[PARSE ERROR] {t}" for t in texts]}
+        """Translates a single chunk of subtitles."""
+        pass
 
     def load_subtitles(self, path: Path) -> pysrt.SubRipFile:
         """Loads subtitles from a file."""
@@ -163,9 +93,7 @@ class GeminiTranslator:
         batch_size: int = 30,
         workers: int = 10,
     ):
-        """
-        Orchestrates the entire translation process.
-        """
+        """Orchestrates the entire translation process."""
         subs = self.load_subtitles(input_path)
 
         if len(subs) == 0:
@@ -192,9 +120,198 @@ class GeminiTranslator:
         subs.save(str(output_path), encoding="utf-8")
 
 
+class GeminiTranslator(BaseTranslator):
+    """Uses Google Gemini API to translate subtitle segments concurrently."""
+
+    def __init__(self, api_key: str, api_url: str):
+        self.api_key = api_key
+        self.api_url = api_url
+
+    def translate_chunk(
+        self, chunk_id: int, texts: List[str], target_lang: str = "Chinese"
+    ) -> Dict:
+        if not texts:
+            return {"id": chunk_id, "lines": []}
+
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is not set in .env")
+
+        count = len(texts)
+        prompt = (
+            f"You are a professional movie subtitle translator.\n"
+            f"Translate the following {count} subtitle segments into {target_lang}.\n"
+            f"**Important Rules:**\n"
+            f"1. **Fix ASR Errors**: If the source text has repetition (e.g. 'no no no no'), translate it naturally (e.g. '不'). Ignore hallucinated metadata.\n"
+            f"2. **Strict Alignment**: Output exactly {count} lines. Line N must correspond to Input N.\n"
+            f"3. **No Bullshit**: Ignore those non-sense words.\n"
+            f"4. **No Extras**: Do not include explanations, notes, or the original text.\n\n"
+            + "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
+        )
+
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+
+        url = f"{self.api_url}?key={self.api_key}"
+
+        max_retries = 5
+        base_delay = 2
+        response = None
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    response.raise_for_status()
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    logger.error("Chunk %d failed: %s", chunk_id, e)
+                    return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
+                time.sleep(base_delay * (2**attempt))
+
+        try:
+            data = response.json()
+            if "candidates" not in data or not data["candidates"]:
+                return {"id": chunk_id, "lines": [f"[API ERROR] {t}" for t in texts]}
+
+            part = data["candidates"][0]["content"]["parts"][0]
+            translated_text = part.get("text", "").strip()
+
+            lines = translated_text.splitlines()
+            translated_lines = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
+                translated_lines.append(clean_line)
+
+            if len(translated_lines) < count:
+                translated_lines += [""] * (count - len(translated_lines))
+            elif len(translated_lines) > count:
+                translated_lines = translated_lines[:count]
+
+            return {"id": chunk_id, "lines": translated_lines}
+
+        except Exception as e:
+            logger.error("Chunk %d parsing error: %s", chunk_id, e)
+            return {"id": chunk_id, "lines": [f"[PARSE ERROR] {t}" for t in texts]}
+
+
+class OpenAITranslator(BaseTranslator):
+    """Uses OpenAI-compatible API to translate subtitle segments concurrently."""
+
+    def __init__(self, api_key: str, base_url: str, model_id: str):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model_id = model_id
+
+    def translate_chunk(
+        self, chunk_id: int, texts: List[str], target_lang: str = "Chinese"
+    ) -> Dict:
+        if not texts:
+            return {"id": chunk_id, "lines": []}
+
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY is not set in .env")
+
+        count = len(texts)
+        system_prompt = (
+            "You are a professional movie subtitle translator.\n"
+            f"Translate subtitle segments into {target_lang}.\n"
+            "**Important Rules:**\n"
+            "1. **Fix ASR Errors**: If the source text has repetition (e.g. 'no no no no'), translate it naturally. Ignore hallucinated metadata.\n"
+            "2. **Strict Alignment**: Output exactly the same number of lines as input. Line N must correspond to Input N.\n"
+            "3. **No Bullshit**: Ignore nonsensical words.\n"
+            "4. **No Extras**: Do not include explanations, notes, or the original text.\n"
+            "5. **Format**: Output only the translated lines, one per line, without numbering."
+        )
+
+        user_prompt = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(texts)])
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        payload = {
+            "model": self.model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+        }
+
+        max_retries = 5
+        base_delay = 2
+        response = None
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.base_url, headers=headers, json=payload, timeout=60
+                )
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    response.raise_for_status()
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    logger.error("Chunk %d failed: %s", chunk_id, e)
+                    return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
+                time.sleep(base_delay * (2**attempt))
+
+        try:
+            data = response.json()
+            if "choices" not in data or not data["choices"]:
+                return {"id": chunk_id, "lines": [f"[API ERROR] {t}" for t in texts]}
+
+            translated_text = data["choices"][0]["message"]["content"].strip()
+
+            lines = translated_text.splitlines()
+            translated_lines = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
+                translated_lines.append(clean_line)
+
+            if len(translated_lines) < count:
+                translated_lines += [""] * (count - len(translated_lines))
+            elif len(translated_lines) > count:
+                translated_lines = translated_lines[:count]
+
+            return {"id": chunk_id, "lines": translated_lines}
+
+        except Exception as e:
+            logger.error("Chunk %d parsing error: %s", chunk_id, e)
+            return {"id": chunk_id, "lines": [f"[PARSE ERROR] {t}" for t in texts]}
+
+
+def create_translator(provider: str | None = None) -> BaseTranslator:
+    """Factory function to create translator based on provider."""
+    provider = provider or TRANSLATION_PROVIDER
+
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is not set in .env")
+        logger.info("Using OpenAI-compatible translator (model: %s)", OPENAI_MODEL_ID)
+        return OpenAITranslator(OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL_ID)
+    else:
+        if not GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not set in .env")
+        logger.info("Using Gemini translator")
+        return GeminiTranslator(GEMINI_API_KEY, GEMINI_API_URL)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Translate SRT subtitles using Gemini API (Concurrent)."
+        description="Translate SRT subtitles using Gemini or OpenAI-compatible API (Concurrent)."
     )
     parser.add_argument("input", help="Path to the input SRT file.")
     parser.add_argument("-o", "--output", help="Path to the output SRT file.")
@@ -211,6 +328,12 @@ def main():
         help="Number of parallel requests. Default: 10.",
     )
     parser.add_argument("--lang", default="Chinese", help="Target language.")
+    parser.add_argument(
+        "--provider",
+        choices=["gemini", "openai"],
+        default=None,
+        help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
+    )
 
     args = parser.parse_args()
     input_path = Path(args.input).resolve()
@@ -224,7 +347,7 @@ def main():
         logger.error("Error: %s not found.", input_path)
         exit(1)
 
-    translator = GeminiTranslator(GEMINI_API_KEY, GEMINI_API_URL)
+    translator = create_translator(args.provider)
     translator.translate_srt(
         input_path,
         output_path,

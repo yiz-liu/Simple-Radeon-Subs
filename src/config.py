@@ -17,6 +17,17 @@ GEMINI_API_URL = os.getenv(
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
 )
 
+# OpenAI Compatible API Settings
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv(
+    "OPENAI_BASE_URL",
+    "https://api.openai.com/v1/chat/completions",
+)
+OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o")
+
+# Translation Provider Selection
+TRANSLATION_PROVIDER = os.getenv("TRANSLATION_PROVIDER", "gemini")
+
 # Tools Directory
 TOOLS_DIR = PROJECT_ROOT / "tools"
 FFMPEG_LOCAL_PATH = TOOLS_DIR / "ffmpeg" / "ffmpeg"
