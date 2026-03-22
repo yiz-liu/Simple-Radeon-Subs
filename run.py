@@ -128,9 +128,9 @@ def process_video(
 
 
 def scan_directory(directory: Path) -> List[Path]:
-    """Scans a directory for supported video files."""
+    """Recursively scans a directory and all subdirectories for supported video files."""
     video_files = []
-    for file in directory.iterdir():
+    for file in directory.rglob("*"):
         if file.is_file() and file.suffix.lower() in VIDEO_EXTENSIONS:
             video_files.append(file)
     return sorted(video_files)
