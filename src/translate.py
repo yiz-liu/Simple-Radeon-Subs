@@ -17,6 +17,7 @@ from src.config import (
     OPENAI_BASE_URL,
     OPENAI_MODEL_ID,
     TRANSLATION_PROVIDER,
+    VLLM_MODEL_PATH,
 )
 from src.logger import logger
 

@@ -25,6 +25,9 @@ OPENAI_BASE_URL = os.getenv(
 )
 OPENAI_MODEL_ID = os.getenv("OPENAI_MODEL_ID", "gpt-4o")
 
+# vLLM Settings
+VLLM_MODEL_PATH = os.getenv("VLLM_MODEL_PATH")
+
 # Translation Provider Selection
 TRANSLATION_PROVIDER = os.getenv("TRANSLATION_PROVIDER", "gemini")
 
@@ -35,6 +38,12 @@ FFMPEG_LOCAL_PATH = TOOLS_DIR / "ffmpeg" / "ffmpeg"
 # Models Directory
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Inject local ffmpeg into PATH so third-party libs (e.g. Whisper) can find it
+if FFMPEG_LOCAL_PATH.exists():
+    os.environ["PATH"] = (
+        str(FFMPEG_LOCAL_PATH.parent) + os.pathsep + os.environ.get("PATH", "")
+    )
 
 # Audio Settings
 AUDIO_SAMPLE_RATE = 16000
