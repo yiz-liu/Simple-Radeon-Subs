@@ -28,10 +28,13 @@ git clone https://github.com/yiz-liu/Simple-Radeon-Subs.git
 cd Simple-Radeon-Subs
 ```
 
-### 2. Set up Virtual Environment
+### 2. Set up Virtual Environment & Install Dependencies
+This project uses [uv](https://docs.astral.sh/uv/) for virtual environment and dependency management.
+
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
 ```
 
 ### 3. Install ROCm-PyTorch (Crucial!)
@@ -43,22 +46,17 @@ Please see [Install Radeon software for WSL with ROCm](https://rocm.docs.amd.com
 
 ```bash
 # Example command (adjust filenames as needed)
-pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cp312-cp312-linux_x86_64.whl
-pip install triton-3.5.1+rocm7.2.0.gita272dfa8-cp312-cp312-linux_x86_64.whl
+uv pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cp312-cp312-linux_x86_64.whl
+uv pip install triton-3.5.1+rocm7.2.0.gita272dfa8-cp312-cp312-linux_x86_64.whl
 ```
 
 *Verify installation:*
 ```bash
-python3 -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
 # Should print: CUDA Available: True
 ```
 
-### 4. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 5. (Optional) Setup Portable FFmpeg
+### 4. (Optional) Setup Portable FFmpeg
 If you have installed FFmpeg, just go with it. To avoid system conflicts (and as a control freak), I choose a static build of FFmpeg.
 
 ```bash
@@ -70,7 +68,7 @@ mv tools/ffmpeg-*-amd64-static tools/ffmpeg
 rm tools/ffmpeg.tar.xz
 ```
 
-### 6. Environment Configuration
+### 5. Environment Configuration
 Create a `.env` file in the project root:
 
 ```bash

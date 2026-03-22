@@ -5,7 +5,7 @@ Movie subtitle translation tool using OpenAI Whisper (transcription) and Google 
 
 ## Development Commands
 
-Before executing any commands, please:
+This project uses [uv](https://docs.astral.sh/uv/) for virtual environment and dependency management. Before executing any commands, please:
 
 ```bash
 source .venv/bin/activate
@@ -44,18 +44,20 @@ python -m src.translate /path/to/subs.srt -o translated.srt --lang Chinese
 ### Environment Setup
 ```bash
 # Create virtual environment
-python3 -m venv .venv
+uv venv
+
+# Activate virtual environment
 source .venv/bin/activate
 
-# Install ROCm-specific PyTorch (REQUIRED - do NOT use PyPI)
-pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cw312-cw312-linux_x86_64.whl
-pip install triton-3.5.1+rocm7.2.0.gita272dfa8-cw312-cw312-linux_x86_64.whl
-
 # Install dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
+
+# Install ROCm-specific PyTorch (REQUIRED - do NOT use PyPI)
+uv pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cw312-cw312-linux_x86_64.whl
+uv pip install triton-3.5.1+rocm7.2.0.gita272dfa8-cw312-cw312-linux_x86_64.whl
 
 # Verify GPU availability
-python3 -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
 ```
 
 ## Code Style Guidelines
