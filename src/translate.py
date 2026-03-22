@@ -330,23 +330,95 @@ class VLLMTranslator(BaseTranslator):
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(f"vLLM model not found: {model_path}")
+        self._llm = None
+        self._sampling_params = None
+
+    def _ensure_llm_loaded(self) -> None:
+        """Lazily initializes the vLLM engine. Idempotent."""
+        if self._llm is not None:
+            return
+        from vllm import LLM, SamplingParams  # noqa: PLC0415
+
+        logger.info("Loading vLLM model: %s", self.model_path.name)
+        self._llm = LLM(
+            model=str(self.model_path),
+            dtype="float16",
+            gpu_memory_utilization=0.75,
+            max_model_len=4096,
+            max_num_seqs=16,
+            enforce_eager=True,
+            enable_prefix_caching=True,
+        )
+        self._sampling_params = SamplingParams(
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            presence_penalty=1.5,
+            max_tokens=1024,
+            skip_special_tokens=True,
+        )
+
+    def _release_llm(self) -> None:
+        """Frees GPU memory. Safe to call even if never loaded."""
+        if self._llm is None:
+            return
+        del self._llm
+        self._llm = None
+        self._sampling_params = None
+        import gc  # noqa: PLC0415
+
+        gc.collect()
+        try:
+            import torch  # noqa: PLC0415
+
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("vLLM model unloaded, GPU memory released.")
 
     def translate_chunk(
         self, chunk_id: int, texts: List[str], target_lang: str
     ) -> Dict:
-        raise NotImplementedError(
-            "VLLMTranslator uses offline batch inference. Call translate_srt() directly."
+        """Translates one chunk via vLLM. Requires _ensure_llm_loaded() to have been called."""
+        if not texts:
+            return {"id": chunk_id, "lines": []}
+        if self._llm is None:
+            raise RuntimeError(
+                "VLLMTranslator._llm is not loaded. "
+                "Call translate_srt() which manages the lifecycle automatically."
+            )
+        conversation = self._build_chat_messages(texts, target_lang)
+        outputs = self._llm.chat(
+            [conversation],  # type: ignore[arg-type]  # vLLM accepts List[List[Dict]]
+            sampling_params=self._sampling_params,
+            chat_template_kwargs={"enable_thinking": False},
+            use_tqdm=False,
         )
+        raw_text = outputs[0].outputs[0].text.strip()
+        if outputs[0].outputs[0].finish_reason == "length":
+            logger.warning("Chunk %d truncated (hit max_tokens limit)", chunk_id)
+        # Defensive: strip any thinking tokens that leaked (Qwen3 may emit them)
+        raw_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+        # Reuse BaseTranslator._parse_translation_output
+        return {
+            "id": chunk_id,
+            "lines": self._parse_translation_output(raw_text, len(texts)),
+        }
 
     def translate_srt(
         self,
         input_path: Path,
         output_path: Path,
         target_lang: str = "Chinese",
-        batch_size: int = 128,
+        # Default 16: constrained by personal device VRAM; avoids exceeding context window
+        batch_size: int = 16,
         workers: int = 16,
     ):
-        """Translates all subtitles in one offline batch using vLLM LLM.chat()."""
+        """Translates subtitles using vLLM offline batch inference.
+
+        Sends batch_size subtitles per LLM conversation. vLLM's internal scheduler
+        (max_num_seqs) handles parallelism; no ThreadPoolExecutor needed.
+        """
         subs = self.load_subtitles(input_path)
 
         if len(subs) == 0:
@@ -354,97 +426,55 @@ class VLLMTranslator(BaseTranslator):
             subs.save(str(output_path), encoding="utf-8")
             return
 
-        # Build one conversation per subtitle line
-        conversations = []
-        for sub in subs:
-            text = sub.text.replace("\n", " ")
-            system_prompt = (
-                f"You are a professional movie subtitle translator. "
-                f"Translate the following subtitle segment into {target_lang}.\n\n"
-                + self._build_rules(1)
-            )
-            conversations.append(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"[1] {text}"},
-                ]
-            )
+        # Reuse base class prepare_chunks
+        chunks = self.prepare_chunks(subs, batch_size)
 
         logger.info(
-            "Translating %d segments via vLLM offline batch (model: %s).",
+            "Translating %d segments (%d chunks of %d) via vLLM (model: %s).",
             len(subs),
+            len(chunks),
+            batch_size,
             self.model_path.name,
         )
 
-        # Lazy LLM construction — GPU memory only used from here
-        from vllm import LLM, SamplingParams  # noqa: PLC0415
+        # Build all conversations (one per chunk)
+        conversations = [
+            self._build_chat_messages(chunk["texts"], target_lang) for chunk in chunks
+        ]
 
-        llm = LLM(
-            model=str(self.model_path),
-            dtype="float16",
-            gpu_memory_utilization=0.75,
-            max_model_len=1024,
-            max_num_seqs=16,
-            enforce_eager=True,
-            enable_prefix_caching=True,
-        )
-        sampling_params = SamplingParams(
-            temperature=0.7,
-            top_p=0.8,
-            top_k=20,
-            presence_penalty=1.5,
-            max_tokens=512,
-            skip_special_tokens=True,
-        )
-
+        self._ensure_llm_loaded()
+        assert self._llm is not None  # guaranteed by _ensure_llm_loaded
         try:
-            outputs = llm.chat(
-                conversations,
-                sampling_params=sampling_params,
+            outputs = self._llm.chat(
+                conversations,  # type: ignore[arg-type]  # vLLM accepts List[List[Dict]]
+                sampling_params=self._sampling_params,
                 chat_template_kwargs={"enable_thinking": False},
                 use_tqdm=True,
             )
         finally:
-            # Always free GPU memory even if inference fails
-            del llm
-            import gc  # noqa: PLC0415
+            self._release_llm()
 
-            gc.collect()
-            try:
-                import torch  # noqa: PLC0415
-
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
-
-        # Extract and clean translations
-        translated_lines = []
-        for i, output in enumerate(outputs):
-            text = output.outputs[0].text.strip()
+        # Parse results into translated_map (matches BaseTranslator.reassemble_subtitles format)
+        translated_map: Dict[int, List[str]] = {}
+        for chunk, output in zip(chunks, outputs):
+            raw_text = output.outputs[0].text.strip()
             if output.outputs[0].finish_reason == "length":
-                logger.warning("Subtitle %d truncated (hit max_tokens limit)", i + 1)
-            # Defensive: strip any thinking tokens that leaked through
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-            # Clean numbering artifacts (e.g. "[1] " prefix from prompt)
-            clean_text = re.sub(r"^\[?\d+\]?\s*:?\s*", "", text)
-            if clean_text.strip().upper() in ("[SKIP]", "SKIP"):
-                translated_lines.append("")
-            else:
-                translated_lines.append(clean_text)
+                logger.warning(
+                    "Chunk starting at subtitle %d truncated (hit max_tokens limit)",
+                    chunk["id"] + 1,
+                )
+            # Defensive: strip any thinking tokens
+            raw_text = re.sub(
+                r"<think>.*?</think>", "", raw_text, flags=re.DOTALL
+            ).strip()
+            # Reuse BaseTranslator._parse_translation_output
+            translated_map[chunk["id"]] = self._parse_translation_output(
+                raw_text, len(chunk["texts"])
+            )
 
-        # Apply translations to subtitle objects in-place
-        for i, sub in enumerate(subs):
-            if i < len(translated_lines):
-                sub.text = translated_lines[i]
-
-        # Filter empty, re-index, save (same pattern as BaseTranslator.translate_srt)
-        non_empty_items = [sub for sub in subs if sub.text.strip()]
-        for i, sub in enumerate(non_empty_items, 1):
-            sub.index = i
-        clean_subs = pysrt.SubRipFile(items=non_empty_items)
-
-        logger.info("Saving to %s...", output_path.name)
-        clean_subs.save(str(output_path), encoding="utf-8")
+        # Reuse base class methods for reassembly and saving
+        self.reassemble_subtitles(subs, translated_map)
+        self._save_filtered(subs, output_path)
 
 
 def create_translator(provider: str | None = None) -> BaseTranslator:
