@@ -117,13 +117,7 @@ class BaseTranslator(ABC):
 
         self.reassemble_subtitles(subs, translated_map)
 
-        non_empty_items = [sub for sub in subs if sub.text.strip()]
-        for i, sub in enumerate(non_empty_items, 1):
-            sub.index = i
-        clean_subs = pysrt.SubRipFile(items=non_empty_items)
-
-        logger.info("Saving to %s...", output_path.name)
-        clean_subs.save(str(output_path), encoding="utf-8")
+        self._save_filtered(subs, output_path)
 
     def _build_rules(self, count: int) -> str:
         """Builds the shared translation rules prompt fragment."""
@@ -137,6 +131,52 @@ class BaseTranslator(ABC):
             f"(incoherent mix of scripts/languages, random characters with no linguistic meaning).\n"
             f"4. **No Extras**: Output only the translated text. No explanations, notes, or original text."
         )
+
+    def _parse_translation_output(
+        self, raw_text: str, expected_count: int
+    ) -> List[str]:
+        """Parses raw LLM translation response into a count-aligned list of strings."""
+        lines = raw_text.splitlines()
+        translated_lines: List[str] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
+            if clean_line.strip().upper() in ("[SKIP]", "SKIP"):
+                translated_lines.append("")
+            else:
+                translated_lines.append(clean_line)
+        if len(translated_lines) < expected_count:
+            translated_lines += [""] * (expected_count - len(translated_lines))
+        elif len(translated_lines) > expected_count:
+            translated_lines = translated_lines[:expected_count]
+        return translated_lines
+
+    def _build_chat_messages(
+        self, texts: List[str], target_lang: str
+    ) -> List[Dict[str, str]]:
+        """Builds standard system+user messages for chat-format APIs."""
+        count = len(texts)
+        system_prompt = (
+            f"You are a professional movie subtitle translator. "
+            f"Translate the following {count} subtitle segment(s) into {target_lang}.\n\n"
+            + self._build_rules(count)
+        )
+        user_prompt = "\n".join([f"[{idx + 1}] {t}" for idx, t in enumerate(texts)])
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def _save_filtered(self, subs: pysrt.SubRipFile, output_path: Path) -> None:
+        """Filters empty subtitles, re-indexes, and saves to file as UTF-8."""
+        non_empty_items = [sub for sub in subs if sub.text.strip()]
+        for i, sub in enumerate(non_empty_items, 1):
+            sub.index = i
+        clean_subs = pysrt.SubRipFile(items=non_empty_items)
+        logger.info("Saving to %s...", output_path.name)
+        clean_subs.save(str(output_path), encoding="utf-8")
 
 
 class GeminiTranslator(BaseTranslator):
@@ -200,24 +240,10 @@ class GeminiTranslator(BaseTranslator):
             part = data["candidates"][0]["content"]["parts"][0]
             translated_text = part.get("text", "").strip()
 
-            lines = translated_text.splitlines()
-            translated_lines = []
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
-                if clean_line.strip().upper() in ("[SKIP]", "SKIP"):
-                    translated_lines.append("")
-                else:
-                    translated_lines.append(clean_line)
-
-            if len(translated_lines) < count:
-                translated_lines += [""] * (count - len(translated_lines))
-            elif len(translated_lines) > count:
-                translated_lines = translated_lines[:count]
-
-            return {"id": chunk_id, "lines": translated_lines}
+            return {
+                "id": chunk_id,
+                "lines": self._parse_translation_output(translated_text, count),
+            }
 
         except Exception as e:
             logger.error("Chunk %d parsing error: %s", chunk_id, e)
@@ -242,13 +268,7 @@ class OpenAITranslator(BaseTranslator):
             raise ValueError("OPENAI_API_KEY is not set in .env")
 
         count = len(texts)
-        system_prompt = (
-            f"You are a professional movie subtitle translator. "
-            f"Translate subtitle segments into {target_lang}.\n\n"
-            + self._build_rules(count)
-        )
-
-        user_prompt = "\n".join([f"[{idx + 1}] {t}" for idx, t in enumerate(texts)])
+        messages = self._build_chat_messages(texts, target_lang)
 
         headers = {
             "Content-Type": "application/json",
@@ -256,10 +276,7 @@ class OpenAITranslator(BaseTranslator):
         }
         payload = {
             "model": self.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": messages,
             "temperature": 0.2,
         }
 
@@ -292,24 +309,10 @@ class OpenAITranslator(BaseTranslator):
 
             translated_text = data["choices"][0]["message"]["content"].strip()
 
-            lines = translated_text.splitlines()
-            translated_lines = []
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                clean_line = re.sub(r"^\[?\d+\]?\s*:?\s*", "", line)
-                if clean_line.strip().upper() in ("[SKIP]", "SKIP"):
-                    translated_lines.append("")
-                else:
-                    translated_lines.append(clean_line)
-
-            if len(translated_lines) < count:
-                translated_lines += [""] * (count - len(translated_lines))
-            elif len(translated_lines) > count:
-                translated_lines = translated_lines[:count]
-
-            return {"id": chunk_id, "lines": translated_lines}
+            return {
+                "id": chunk_id,
+                "lines": self._parse_translation_output(translated_text, count),
+            }
 
         except Exception as e:
             logger.error("Chunk %d parsing error: %s", chunk_id, e)
@@ -379,8 +382,8 @@ class VLLMTranslator(BaseTranslator):
         llm = LLM(
             model=str(self.model_path),
             dtype="float16",
-            gpu_memory_utilization=0.6,
-            max_model_len=4096,
+            gpu_memory_utilization=0.75,
+            max_model_len=1024,
             max_num_seqs=16,
             enforce_eager=True,
             enable_prefix_caching=True,
@@ -390,7 +393,7 @@ class VLLMTranslator(BaseTranslator):
             top_p=0.8,
             top_k=20,
             presence_penalty=1.5,
-            max_tokens=256,
+            max_tokens=512,
             skip_special_tokens=True,
         )
 
