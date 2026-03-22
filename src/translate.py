@@ -173,6 +173,9 @@ class GeminiTranslator(BaseTranslator):
                     return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
                 time.sleep(base_delay * (2**attempt))
 
+        if response is None:
+            return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
+
         try:
             data = response.json()
             if "candidates" not in data or not data["candidates"]:
@@ -264,6 +267,9 @@ class OpenAITranslator(BaseTranslator):
                     logger.error("Chunk %d failed: %s", chunk_id, e)
                     return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
                 time.sleep(base_delay * (2**attempt))
+
+        if response is None:
+            return {"id": chunk_id, "lines": [f"[ERROR] {t}" for t in texts]}
 
         try:
             data = response.json()
