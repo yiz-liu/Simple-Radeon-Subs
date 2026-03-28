@@ -39,6 +39,7 @@ def process_video(
     src_lang: Optional[str],
     model_name: str,
     keep_temp: bool,
+    force: bool,
     provider: Optional[str] = None,
 ):
     """
@@ -54,7 +55,7 @@ def process_video(
     final_srt_path = final_output_dir / final_srt_name
 
     # Check if output already exists
-    if final_srt_path.exists():
+    if final_srt_path.exists() and not force:
         logger.info("Subtitle already exists: %s (Skipping)", final_srt_path)
         return
 
@@ -173,6 +174,12 @@ def main():
         "--keep-temp", action="store_true", help="Keep temporary files for debugging."
     )
     parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite existing generated subtitle files.",
+    )
+    parser.add_argument(
         "--provider",
         choices=["gemini", "openai", "vllm"],
         default=None,
@@ -214,6 +221,7 @@ def main():
             src_lang=args.src_lang,
             model_name=args.model,
             keep_temp=args.keep_temp,
+            force=args.force,
             provider=args.provider,
         )
 

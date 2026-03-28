@@ -89,6 +89,9 @@ python run.py /path/to/movie.mkv --output-dir ./subs --lang "French"
 
 # Keep temporary files (wav, raw srt) for debugging
 python run.py /path/to/video.mp4 --keep-temp
+
+# Overwrite an existing generated subtitle file
+python run.py /path/to/video.mp4 -f
 ```
 
 ### Arguments
@@ -98,6 +101,7 @@ python run.py /path/to/video.mp4 --keep-temp
 - `--src-lang`: Source language of the audio (e.g., 'en', 'zh'). Auto-detects if omitted.
 - `--model`: Whisper model to use (default: `large-v3-turbo`).
 - `--keep-temp`: Don't delete intermediate files (`.wav`, `.cleaned.srt`).
+- `-f, --force`: Overwrite an existing generated subtitle file instead of skipping it.
 
 ## 🛑 Troubleshooting & Pitfalls
 
