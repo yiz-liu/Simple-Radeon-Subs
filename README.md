@@ -92,6 +92,9 @@ python run.py /path/to/video.mp4 --keep-temp
 
 # Overwrite an existing generated subtitle file
 python run.py /path/to/video.mp4 -f
+
+# Transcription now uses Whisper's built-in tqdm progress bar by default
+python run.py /path/to/video.mp4
 ```
 
 ### Arguments
@@ -102,6 +105,8 @@ python run.py /path/to/video.mp4 -f
 - `--model`: Whisper model to use (default: `large-v3-turbo`).
 - `--keep-temp`: Don't delete intermediate files (`.wav`, `.cleaned.srt`).
 - `-f, --force`: Overwrite an existing generated subtitle file instead of skipping it.
+
+For standalone transcription, `python -m src.transcribe` now shows Whisper's built-in tqdm progress bar by default. Use `--verbose-text` to print decoded text instead, or `--quiet` to suppress Whisper progress output entirely.
 
 ## 🛑 Troubleshooting & Pitfalls
 
