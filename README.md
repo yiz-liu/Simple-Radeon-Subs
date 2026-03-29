@@ -87,14 +87,17 @@ python run.py /path/to/video.mp4
 # Specify output directory and target language
 python run.py /path/to/movie.mkv --output-dir ./subs --lang "French"
 
-# Keep temporary files (wav, raw srt) for debugging
+# Keep intermediate files after success
 python run.py /path/to/video.mp4 --keep-temp
 
-# Overwrite an existing generated subtitle file
+# Overwrite an existing generated subtitle file and restart from clean intermediates
 python run.py /path/to/video.mp4 -f
 
 # Transcription now uses Whisper's built-in tqdm progress bar by default
 python run.py /path/to/video.mp4
+
+# Generate translated subtitles only instead of bilingual output
+python run.py /path/to/video.mp4 --translated-only
 ```
 
 ### Arguments
@@ -103,10 +106,15 @@ python run.py /path/to/video.mp4
 - `--lang`: Target language (default: "Chinese").
 - `--src-lang`: Source language of the audio (e.g., 'en', 'zh'). Auto-detects if omitted.
 - `--model`: Whisper model to use (default: `large-v3-turbo`).
-- `--keep-temp`: Don't delete intermediate files (`.wav`, `.cleaned.srt`).
-- `-f, --force`: Overwrite an existing generated subtitle file instead of skipping it.
+- `--keep-temp`: Keep intermediate files (`.wav`, raw `.srt`, `.cleaned.srt`) after successful completion.
+- `-f, --force`: Overwrite an existing generated subtitle file and delete old intermediate files before restarting.
+- `--translated-only`: Output only translated subtitles instead of the default bilingual subtitles.
 
 For standalone transcription, `python -m src.transcribe` now shows Whisper's built-in tqdm progress bar by default. Use `--verbose-text` to print decoded text instead, or `--quiet` to suppress Whisper progress output entirely.
+
+By default, translated subtitle output is bilingual: each saved subtitle block contains the cleaned source text followed by the translated text. Entries whose translated text is empty or skipped are removed entirely so the final bilingual subtitles stay aligned with the filtered translation result.
+
+By default, intermediate files are now written to the final output directory so interrupted runs can reuse them later. They are only deleted after the final subtitle is generated successfully; if a run fails midway, the intermediate files stay in place for the next retry.
 
 ## 🛑 Troubleshooting & Pitfalls
 

@@ -1,7 +1,7 @@
 import argparse
 import gc
+import shutil
 import sys
-import tempfile
 import time
 import torch
 from pathlib import Path
@@ -32,6 +32,17 @@ VIDEO_EXTENSIONS = {
 }
 
 
+def cleanup_intermediate_files(paths: List[Path]) -> None:
+    """Deletes intermediate files or directories if they exist."""
+    for path in paths:
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
 def process_video(
     input_path: Path,
     output_dir: Optional[Path],
@@ -40,6 +51,7 @@ def process_video(
     model_name: str,
     keep_temp: bool,
     force: bool,
+    translated_only: bool,
     provider: Optional[str] = None,
 ):
     """
@@ -53,25 +65,23 @@ def process_video(
     base_name = input_path.stem
     final_srt_name = f"{base_name}.{target_lang}.srt"
     final_srt_path = final_output_dir / final_srt_name
+    temp_wav_path = final_output_dir / f"{base_name}.wav"
+    raw_srt_path = final_output_dir / f"{base_name}.srt"
+    cleaned_srt_path = final_output_dir / f"{base_name}.cleaned.srt"
+    intermediate_paths = [temp_wav_path, raw_srt_path, cleaned_srt_path]
 
     # Check if output already exists
     if final_srt_path.exists() and not force:
         logger.info("Subtitle already exists: %s (Skipping)", final_srt_path)
         return
 
+    if force:
+        cleanup_intermediate_files(intermediate_paths)
+
     logger.info("Processing: %s", input_path.name)
     start_time = time.time()
 
-    # Create a temporary directory for intermediate files
-    temp_dir_obj = None
-    if keep_temp:
-        temp_dir = PROJECT_ROOT / "temp_workspace"
-        temp_dir.mkdir(exist_ok=True)
-        logger.warning("Temp files will be kept in: %s", temp_dir)
-    else:
-        temp_dir_obj = tempfile.TemporaryDirectory(prefix="movie_translator_")
-        temp_dir = Path(temp_dir_obj.name)
-        logger.info("Using temporary directory: %s", temp_dir)
+    logger.info("Intermediate files will be stored in: %s", final_output_dir)
 
     try:
         # =================================================================
@@ -79,10 +89,8 @@ def process_video(
         # =================================================================
         logger.info("[%s] Step 1: Extract Audio", base_name)
         audio_extractor = AudioExtractor()
-        temp_wav_path = temp_dir / f"{base_name}.wav"
-
         audio_path = audio_extractor.extract(
-            input_path, output_path=temp_wav_path, force=True
+            input_path, output_path=temp_wav_path, force=force
         )
 
         # =================================================================
@@ -90,10 +98,15 @@ def process_video(
         # =================================================================
         logger.info("[%s] Step 2: Transcribe Audio", base_name)
         transcriber = Transcriber(model_name=model_name)
-        # Transcriber saves .srt to output_dir
-        raw_srt_path = transcriber.transcribe(
-            audio_path, output_dir=temp_dir, language=src_lang, verbose=False
-        )
+        if raw_srt_path.exists() and not force:
+            logger.info("Reusing transcription: %s", raw_srt_path)
+        else:
+            raw_srt_path = transcriber.transcribe(
+                audio_path,
+                output_dir=final_output_dir,
+                language=src_lang,
+                verbose=False,
+            )
 
         # Free GPU memory from Whisper before potential vLLM translation
         del transcriber
@@ -105,10 +118,10 @@ def process_video(
         # Step 3: Clean & Merge
         # =================================================================
         logger.info("[%s] Step 3: Clean Subtitles", base_name)
-        cleaned_srt_path = temp_dir / f"{base_name}.cleaned.srt"
-
-        # clean_srt reads input, writes to output (if provided)
-        clean_srt(raw_srt_path, output_path=cleaned_srt_path)
+        if cleaned_srt_path.exists() and not force:
+            logger.info("Reusing cleaned subtitles: %s", cleaned_srt_path)
+        else:
+            clean_srt(raw_srt_path, output_path=cleaned_srt_path)
 
         # =================================================================
         # Step 4: Translate
@@ -120,18 +133,21 @@ def process_video(
             input_path=cleaned_srt_path,
             output_path=final_srt_path,
             target_lang=target_lang,
+            translated_only=translated_only,
         )
 
         elapsed = time.time() - start_time
         logger.info("✅ Done: %s (Time: %.2fs)", input_path.name, elapsed)
         logger.info("💾 Output: %s", final_srt_path)
 
+        if keep_temp:
+            logger.info("Keeping intermediate files in: %s", final_output_dir)
+        else:
+            cleanup_intermediate_files(intermediate_paths)
+            logger.info("Cleaned intermediate files for %s.", input_path.name)
+
     except Exception as e:
         logger.error("Failed to process %s: %s", input_path.name, e, exc_info=True)
-    finally:
-        if temp_dir_obj:
-            logger.info("Cleaning up temporary files for %s...", input_path.name)
-            temp_dir_obj.cleanup()
 
 
 def scan_directory(directory: Path) -> List[Path]:
@@ -171,13 +187,20 @@ def main():
         help="Whisper model name (default: large-v3-turbo).",
     )
     parser.add_argument(
-        "--keep-temp", action="store_true", help="Keep temporary files for debugging."
+        "--keep-temp",
+        action="store_true",
+        help="Keep intermediate files after successful completion.",
     )
     parser.add_argument(
         "-f",
         "--force",
         action="store_true",
-        help="Overwrite existing generated subtitle files.",
+        help="Overwrite final subtitles and restart from clean intermediate files.",
+    )
+    parser.add_argument(
+        "--translated-only",
+        action="store_true",
+        help="Generate translated subtitles only instead of bilingual subtitles.",
     )
     parser.add_argument(
         "--provider",
@@ -222,6 +245,7 @@ def main():
             model_name=args.model,
             keep_temp=args.keep_temp,
             force=args.force,
+            translated_only=args.translated_only,
             provider=args.provider,
         )
 

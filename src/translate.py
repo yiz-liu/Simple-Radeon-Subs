@@ -75,16 +75,17 @@ class BaseTranslator(ABC):
 
     def reassemble_subtitles(
         self, subs: pysrt.SubRipFile, translated_map: Dict[int, List[str]]
-    ):
-        """Updates the subtitle objects with translated text in-place."""
+    ) -> List[str]:
+        """Returns translated text aligned to the cleaned subtitle order."""
         logger.info("Reassembling subtitle file...")
-        final_translations = []
+        final_translations = [""] * len(subs)
         for start_idx in sorted(translated_map.keys()):
-            final_translations.extend(translated_map[start_idx])
+            for offset, translated_text in enumerate(translated_map[start_idx]):
+                target_idx = start_idx + offset
+                if target_idx < len(final_translations):
+                    final_translations[target_idx] = translated_text
 
-        for i, sub in enumerate(subs):
-            if i < len(final_translations):
-                sub.text = final_translations[i]
+        return final_translations
 
     def translate_srt(
         self,
@@ -93,6 +94,7 @@ class BaseTranslator(ABC):
         target_lang: str = "Chinese",
         batch_size: int = 128,
         workers: int = 16,
+        translated_only: bool = False,
     ):
         """Orchestrates the entire translation process."""
         subs = self.load_subtitles(input_path)
@@ -115,9 +117,9 @@ class BaseTranslator(ABC):
             chunks, target_lang, workers
         )
 
-        self.reassemble_subtitles(subs, translated_map)
+        translated_lines = self.reassemble_subtitles(subs, translated_map)
 
-        self._save_filtered(subs, output_path)
+        self._save_filtered(subs, translated_lines, output_path, translated_only)
 
     def _build_rules(self, count: int) -> str:
         """Builds the shared translation rules prompt fragment."""
@@ -169,12 +171,38 @@ class BaseTranslator(ABC):
             {"role": "user", "content": user_prompt},
         ]
 
-    def _save_filtered(self, subs: pysrt.SubRipFile, output_path: Path) -> None:
-        """Filters empty subtitles, re-indexes, and saves to file as UTF-8."""
-        non_empty_items = [sub for sub in subs if sub.text.strip()]
-        for i, sub in enumerate(non_empty_items, 1):
-            sub.index = i
-        clean_subs = pysrt.SubRipFile(items=non_empty_items)
+    def _save_filtered(
+        self,
+        subs: pysrt.SubRipFile,
+        translated_lines: List[str],
+        output_path: Path,
+        translated_only: bool,
+    ) -> None:
+        """Filters empty translated lines, re-indexes, and saves the final subtitle file."""
+        final_items = []
+
+        for sub, translated_text in zip(subs, translated_lines):
+            if not translated_text.strip():
+                continue
+
+            final_text = translated_text
+            if not translated_only:
+                source_text = sub.text.strip()
+                final_text = (
+                    f"{source_text}\n{translated_text}" if source_text else translated_text
+                )
+
+            final_items.append(
+                pysrt.SubRipItem(
+                    index=len(final_items) + 1,
+                    start=sub.start,
+                    end=sub.end,
+                    text=final_text,
+                    position=sub.position,
+                )
+            )
+
+        clean_subs = pysrt.SubRipFile(items=final_items)
         logger.info("Saving to %s...", output_path.name)
         clean_subs.save(str(output_path), encoding="utf-8")
 
@@ -413,6 +441,7 @@ class VLLMTranslator(BaseTranslator):
         # Default 16: constrained by personal device VRAM; avoids exceeding context window
         batch_size: int = 16,
         workers: int = 16,
+        translated_only: bool = False,
     ):
         """Translates subtitles using vLLM offline batch inference.
 
@@ -473,8 +502,8 @@ class VLLMTranslator(BaseTranslator):
             )
 
         # Reuse base class methods for reassembly and saving
-        self.reassemble_subtitles(subs, translated_map)
-        self._save_filtered(subs, output_path)
+        translated_lines = self.reassemble_subtitles(subs, translated_map)
+        self._save_filtered(subs, translated_lines, output_path, translated_only)
 
 
 def create_translator(provider: str | None = None) -> BaseTranslator:
@@ -523,6 +552,11 @@ def main():
         default=None,
         help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
     )
+    parser.add_argument(
+        "--translated-only",
+        action="store_true",
+        help="Generate translated subtitles only instead of bilingual subtitles.",
+    )
 
     args = parser.parse_args()
     input_path = Path(args.input).resolve()
@@ -543,6 +577,7 @@ def main():
         target_lang=args.lang,
         batch_size=args.batch_size,
         workers=args.workers,
+        translated_only=args.translated_only,
     )
     logger.info("Done.")
 
