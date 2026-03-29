@@ -46,7 +46,7 @@ class Transcriber:
         audio_path: str | Path,
         output_dir: Optional[str | Path] = None,
         language: Optional[str] = None,
-        verbose: bool = True,
+        verbose: Optional[bool] = False,
     ) -> Path:
         """
         Transcribes the audio file and saves the result as an SRT file.
@@ -55,7 +55,8 @@ class Transcriber:
             audio_path: Path to the audio file.
             output_dir: Directory to save the SRT file. Defaults to audio file's directory.
             language: Optional language code (e.g., 'en', 'ja'). If None, auto-detects.
-            verbose: Whether to print progress to console.
+            verbose: Whisper console output mode. True prints decoded text,
+                False shows Whisper's built-in tqdm progress bar, and None is silent.
 
         Returns:
             Path: The path to the generated SRT file.
@@ -114,19 +115,35 @@ def main():
         help="Language of the audio (e.g., 'en', 'zh'). Auto-detects if omitted.",
     )
     parser.add_argument("--device", help="Device to use ('cuda' or 'cpu').")
-    parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Minimize console output."
+
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Disable Whisper progress output.",
+    )
+    output_group.add_argument(
+        "--verbose-text",
+        action="store_true",
+        help="Print Whisper decoded text instead of the tqdm progress bar.",
     )
 
     args = parser.parse_args()
 
     try:
+        verbose: Optional[bool] = False
+        if args.quiet:
+            verbose = None
+        elif args.verbose_text:
+            verbose = True
+
         transcriber = Transcriber(model_name=args.model, device=args.device)
         transcriber.transcribe(
             args.input,
             output_dir=args.output_dir,
             language=args.language,
-            verbose=not args.quiet,
+            verbose=verbose,
         )
     except Exception as e:
         logger.error("Error: %s", e)

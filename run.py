@@ -92,7 +92,7 @@ def process_video(
         transcriber = Transcriber(model_name=model_name)
         # Transcriber saves .srt to output_dir
         raw_srt_path = transcriber.transcribe(
-            audio_path, output_dir=temp_dir, language=src_lang, verbose=True
+            audio_path, output_dir=temp_dir, language=src_lang, verbose=False
         )
 
         # Free GPU memory from Whisper before potential vLLM translation
