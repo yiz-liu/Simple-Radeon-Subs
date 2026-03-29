@@ -3,6 +3,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 # Project Root (Assumes this file is in src/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,3 +56,10 @@ if FFMPEG_LOCAL_PATH.exists():
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1
 AUDIO_CODEC = "pcm_s16le"
+
+VAD_ENABLED = _get_bool_env("VAD_ENABLED", True)
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
+VAD_MIN_SPEECH_DURATION_MS = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "250"))
+VAD_MIN_SILENCE_DURATION_MS = int(os.getenv("VAD_MIN_SILENCE_DURATION_MS", "120"))
+VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "250"))
+VAD_MAX_SPEECH_DURATION_S = float(os.getenv("VAD_MAX_SPEECH_DURATION_S", "30.0"))

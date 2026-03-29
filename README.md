@@ -9,7 +9,7 @@ A One-Time-Code simple toolchain for automatically generating movie subtitles. T
 ## 🚀 Steps
 
 - **Audio Extraction**: Extracts optimized audio (16kHz, Mono) from video files using a portable FFmpeg build.
-- **Transcription**: Uses `openai-whisper` (accelerated by ROCm/PyTorch) to generate timestamped SRT files.
+- **Transcription**: Uses Silero VAD to pre-segment speech, then runs `openai-whisper` (accelerated by ROCm/PyTorch) with `clip_timestamps` to generate timestamped SRT files.
 - **Cleaning**: Automatically removes SDH tags (e.g., `[Music]`, `(Applause)`), HTML tags, and common ASR hallucinations.
 - **Translation**: Translates subtitles into your target language (default: Chinese) using the Google Gemini API with multi-threaded concurrency for speed.
 
@@ -81,7 +81,7 @@ cp .env.template .env
 Run the full pipeline (Extract -> Transcribe -> Clean -> Translate) with `run.py`.
 
 ```bash
-# Basic usage (defaults to Chinese translation)
+# Basic usage with the default VAD + Whisper pipeline
 python run.py /path/to/video.mp4
 
 # Specify output directory and target language
@@ -90,11 +90,11 @@ python run.py /path/to/movie.mkv --output-dir ./subs --lang "French"
 # Keep intermediate files after success
 python run.py /path/to/video.mp4 --keep-temp
 
+# Disable VAD and transcribe the full audio with Whisper
+python run.py /path/to/video.mp4 --no-vad
+
 # Overwrite an existing generated subtitle file and restart from clean intermediates
 python run.py /path/to/video.mp4 -f
-
-# Transcription now uses Whisper's built-in tqdm progress bar by default
-python run.py /path/to/video.mp4
 
 # Generate translated subtitles only instead of bilingual output
 python run.py /path/to/video.mp4 --translated-only
@@ -106,11 +106,16 @@ python run.py /path/to/video.mp4 --translated-only
 - `--lang`: Target language (default: "Chinese").
 - `--src-lang`: Source language of the audio (e.g., 'en', 'zh'). Auto-detects if omitted.
 - `--model`: Whisper model to use (default: `large-v3-turbo`).
-- `--keep-temp`: Keep intermediate files (`.wav`, raw `.srt`, `.cleaned.srt`) after successful completion.
+- `--keep-temp`: Keep intermediate files (`.wav`, `.vad.json`, raw `.srt`, `.cleaned.srt`) after successful completion.
 - `-f, --force`: Overwrite an existing generated subtitle file and delete old intermediate files before restarting.
 - `--translated-only`: Output only translated subtitles instead of the default bilingual subtitles.
+- `--no-vad`: Disable Silero VAD pre-segmentation and let Whisper transcribe the full audio directly.
 
-For standalone transcription, `python -m src.transcribe` now shows Whisper's built-in tqdm progress bar by default. Use `--verbose-text` to print decoded text instead, or `--quiet` to suppress Whisper progress output entirely.
+By default, the full pipeline now runs Silero VAD before Whisper. The generated `.vad.json` report contains the speech segments and flattened `clip_timestamps` that are passed into Whisper.
+
+When VAD is enabled, transcription progress is now shown against detected speech coverage instead of the full media duration, so long silent gaps no longer leave the Whisper progress bar looking unfinished at the end.
+
+For standalone VAD analysis, run `python -m src.vad /path/to/audio.wav`. For standalone transcription, `python -m src.transcribe` still shows a progress bar by default, supports `--clip-timestamps-file`, uses the same clip-aware progress behavior when timestamps are provided, and accepts `--verbose-text` or `--quiet` just like before.
 
 By default, translated subtitle output is bilingual: each saved subtitle block contains the cleaned source text followed by the translated text. Entries whose translated text is empty or skipped are removed entirely so the final bilingual subtitles stay aligned with the filtered translation result.
 
