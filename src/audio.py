@@ -1,5 +1,4 @@
 import argparse
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,7 +7,12 @@ from typing import Optional
 from tqdm import tqdm
 
 from src.config import AUDIO_CHANNELS, AUDIO_CODEC, AUDIO_SAMPLE_RATE
+from src.ffmpeg_progress import parse_out_time_seconds
 from src.logger import logger
+
+
+class AudioExtractionError(RuntimeError):
+    """Report an FFmpeg failure while extracting audio."""
 
 
 class AudioExtractor:
@@ -47,17 +51,13 @@ class AudioExtractor:
         try:
             output = subprocess.check_output(cmd).decode().strip()
             return float(output)
-        except Exception:
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            logger.warning(
+                "Unable to determine media duration: %s",
+                input_path,
+                exc_info=True,
+            )
             return 0.0
-
-    def _parse_time(self, line: str) -> Optional[float]:
-        """Parses FFmpeg output line for time=HH:MM:SS.mm"""
-        # Example: frame=  517 fps=0.0 q=-0.0 size=    1506kB time=00:00:20.64 bitrate= 597.1kbits/s
-        match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-        if match:
-            h, m, s = map(float, match.groups())
-            return h * 3600 + m * 60 + s
-        return None
 
     def extract(
         self,
@@ -92,6 +92,13 @@ class AudioExtractor:
         cmd = [
             self.ffmpeg_path,
             "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
             "-i",
             str(input_file),
             "-vn",
@@ -101,38 +108,44 @@ class AudioExtractor:
             str(AUDIO_SAMPLE_RATE),
             "-ac",
             str(AUDIO_CHANNELS),
-            "-stats",  # Force stats output
             str(output_file),
         ]
 
-        # Use Popen to read stderr line by line
-        process = subprocess.Popen(
+        progress_total = duration if duration > 0 else None
+        with subprocess.Popen(
             cmd,
-            stderr=subprocess.STDOUT,  # Merge stderr into stdout for easier reading
+            stderr=subprocess.STDOUT,
             stdout=subprocess.PIPE,
-            universal_newlines=True,
+            text=True,
             bufsize=1,
-        )
+        ) as process:
+            with tqdm(
+                total=progress_total,
+                desc="Processing audio",
+                unit="s",
+            ) as pbar:
+                last_time = 0.0
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        current_time = parse_out_time_seconds(line.strip())
+                        if current_time is None:
+                            continue
+                        displayed_time = (
+                            min(current_time, duration)
+                            if duration > 0
+                            else current_time
+                        )
+                        if displayed_time > last_time:
+                            pbar.update(displayed_time - last_time)
+                            last_time = displayed_time
 
-        with tqdm(total=int(duration), desc="Processing audio", unit="s") as pbar:
-            last_time = 0.0
-            if process.stdout:
-                for line in process.stdout:
-                    current_time = self._parse_time(line)
-                    if current_time is not None:
-                        diff = current_time - last_time
-                        if diff > 0:
-                            pbar.update(int(diff))
-                            last_time = current_time
+                return_code = process.wait()
+                if return_code == 0 and duration > 0 and last_time < duration:
+                    pbar.update(duration - last_time)
 
-            process.wait()
-            # Ensure bar reaches 100%
-            if last_time < duration:
-                pbar.update(int(duration - last_time))
-
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"FFmpeg failed to extract audio (code {process.returncode})."
+        if return_code != 0:
+            raise AudioExtractionError(
+                f"FFmpeg failed to extract audio (code {return_code})."
             )
 
         return output_file
@@ -154,8 +167,8 @@ def main():
     try:
         extractor = AudioExtractor()
         extractor.extract(args.input, output_path=args.output, force=args.force)
-    except Exception as e:
-        logger.error("Error: %s", e)
+    except (AudioExtractionError, FileNotFoundError, OSError, ValueError) as error:
+        logger.error("Error: %s", error, exc_info=True)
         exit(1)
 
 
