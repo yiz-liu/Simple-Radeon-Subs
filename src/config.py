@@ -38,19 +38,9 @@ VLLM_MODEL_PATH = os.getenv("VLLM_MODEL_PATH")
 # Translation Provider Selection
 TRANSLATION_PROVIDER = os.getenv("TRANSLATION_PROVIDER", "gemini")
 
-# Tools Directory
-TOOLS_DIR = PROJECT_ROOT / "tools"
-FFMPEG_LOCAL_PATH = TOOLS_DIR / "ffmpeg" / "ffmpeg"
-
 # Models Directory
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Inject local ffmpeg into PATH so third-party libs (e.g. Whisper) can find it
-if FFMPEG_LOCAL_PATH.exists():
-    os.environ["PATH"] = (
-        str(FFMPEG_LOCAL_PATH.parent) + os.pathsep + os.environ.get("PATH", "")
-    )
 
 # Audio Settings
 AUDIO_SAMPLE_RATE = 16000

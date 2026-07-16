@@ -7,7 +7,7 @@ from typing import Optional
 
 from tqdm import tqdm
 
-from src.config import AUDIO_CHANNELS, AUDIO_CODEC, AUDIO_SAMPLE_RATE, FFMPEG_LOCAL_PATH
+from src.config import AUDIO_CHANNELS, AUDIO_CODEC, AUDIO_SAMPLE_RATE
 from src.logger import logger
 
 
@@ -17,42 +17,20 @@ class AudioExtractor:
     Target format: 16kHz, Mono, 16-bit PCM WAV.
     """
 
-    def __init__(self, ffmpeg_path: Optional[str] = None):
-        """
-        Initialize the AudioExtractor.
+    def __init__(self):
+        """Initialize the audio extractor with system FFmpeg tools."""
+        self.ffmpeg_path = self._resolve_binary("ffmpeg")
+        self.ffprobe_path = self._resolve_binary("ffprobe")
 
-        Args:
-            ffmpeg_path (str, optional): Path to the ffmpeg binary.
-                                         Defaults to searching in PATH or project-local tools.
-        """
-        self.ffmpeg_path = self._resolve_ffmpeg(ffmpeg_path)
-        # ffprobe is usually in the same directory as ffmpeg
-        self.ffprobe_path = str(Path(self.ffmpeg_path).parent / "ffprobe")
-        if not Path(self.ffprobe_path).exists():
-            # Fallback to system path if not found in the same folder
-            self.ffprobe_path = shutil.which("ffprobe") or "ffprobe"
-
-    def _resolve_ffmpeg(self, custom_path: Optional[str]) -> str:
-        """Finds the ffmpeg executable."""
-        if custom_path:
-            path = Path(custom_path).resolve()
-            if not path.is_file():
-                raise FileNotFoundError(f"Custom ffmpeg path not found: {custom_path}")
-            return str(path)
-
-        # Priority 1: Check system PATH
-        system_tool = shutil.which("ffmpeg")
-        if system_tool:
-            return system_tool
-
-        # Priority 2: Check project-local tools
-        project_tool = FFMPEG_LOCAL_PATH
-        if project_tool.exists():
-            return str(project_tool)
-
-        raise FileNotFoundError(
-            "ffmpeg binary not found. Please install it or place it in tools/ffmpeg/ffmpeg."
-        )
+    @staticmethod
+    def _resolve_binary(name: str) -> str:
+        executable = shutil.which(name)
+        if executable is None:
+            raise FileNotFoundError(
+                f"Required system executable '{name}' was not found on PATH. "
+                "Install FFmpeg with: sudo apt install ffmpeg"
+            )
+        return executable
 
     def get_duration(self, input_path: Path) -> float:
         """Gets the duration of the input file in seconds using ffprobe."""
@@ -171,12 +149,10 @@ def main():
     parser.add_argument(
         "-f", "--force", action="store_true", help="Force overwrite if output exists."
     )
-    parser.add_argument("--ffmpeg-path", help="Custom path to the ffmpeg binary.")
-
     args = parser.parse_args()
 
     try:
-        extractor = AudioExtractor(ffmpeg_path=args.ffmpeg_path)
+        extractor = AudioExtractor()
         extractor.extract(args.input, output_path=args.output, force=args.force)
     except Exception as e:
         logger.error("Error: %s", e)

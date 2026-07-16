@@ -130,7 +130,7 @@ The ROCm ASR dependency group will be added after the ASR backend is selected.
 - Target format: 16kHz, Mono, 16-bit PCM WAV
 - Use FFmpeg for audio extraction
 - Parse FFmpeg progress output for progress bars
-- Handle both system and local FFmpeg binaries
+- Require system FFmpeg and ffprobe binaries on `PATH`
 
 ### API Integration
 - Implement retry logic for HTTP requests
