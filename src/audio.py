@@ -7,12 +7,26 @@ from typing import Optional
 from tqdm import tqdm
 
 from src.config import AUDIO_CHANNELS, AUDIO_CODEC, AUDIO_SAMPLE_RATE
-from src.ffmpeg_progress import parse_out_time_seconds
 from src.logger import logger
 
 
 class AudioExtractionError(RuntimeError):
     """Report an FFmpeg failure while extracting audio."""
+
+
+def parse_out_time_seconds(line: str) -> float | None:
+    key, separator, raw_value = line.partition("=")
+    if separator != "=" or key != "out_time_us":
+        return None
+
+    try:
+        microseconds = int(raw_value)
+    except ValueError:
+        return None
+
+    if microseconds < 0:
+        return None
+    return microseconds / 1_000_000
 
 
 class AudioExtractor:

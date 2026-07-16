@@ -1,4 +1,4 @@
-from src.ffmpeg_progress import parse_out_time_seconds
+from src.audio import parse_out_time_seconds
 
 
 def test_parse_out_time_seconds_converts_microseconds() -> None:
