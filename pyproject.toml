@@ -1,0 +1,28 @@
+[project]
+name = "simple-radeon-subs"
+version = "0.1.0"
+description = "Generate and translate movie subtitles on AMD Radeon GPUs"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "python-dotenv>=1.2.1",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.12.0",
+]
+
+[tool.uv]
+default-groups = []
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"

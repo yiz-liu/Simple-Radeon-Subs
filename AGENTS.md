@@ -1,7 +1,7 @@
 # AGENTS.md - Development Guidelines for Simple Radeon Subs
 
 ## Project Overview
-Movie subtitle translation tool using OpenAI Whisper (transcription) and Google Gemini (translation). Optimized for AMD GPUs on WSL with ROCm 7.2.0.
+Movie subtitle translation tool using ASR transcription and Google Gemini translation. Targeted at AMD GPUs on WSL with ROCm.
 
 ## Development Commands
 
@@ -43,22 +43,20 @@ python -m src.translate /path/to/subs.srt -o translated.srt --lang Chinese
 
 ### Environment Setup
 ```bash
-# Create virtual environment
-uv venv
+# Install the project Python version
+uv python install 3.12
+
+# Generate the lock file after dependency changes
+uv lock --managed-python
+
+# Create the development environment from the committed lock file
+uv sync --locked --managed-python --group dev
 
 # Activate virtual environment
 source .venv/bin/activate
-
-# Install dependencies
-uv pip install -r requirements.txt
-
-# Install ROCm-specific PyTorch (REQUIRED - do NOT use PyPI)
-uv pip install torch-2.9.1+rocm7.2.0.lw.git7e1940d4-cw312-cw312-linux_x86_64.whl
-uv pip install triton-3.5.1+rocm7.2.0.gita272dfa8-cw312-cw312-linux_x86_64.whl
-
-# Verify GPU availability
-python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
 ```
+
+The ROCm ASR dependency group will be added after the ASR backend is selected.
 
 ## Code Style Guidelines
 
@@ -141,7 +139,7 @@ python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
 - Validate API responses before processing
 
 ### Testing Notes
-- No automated test framework currently configured
+- Pytest is configured for tests under `tests/`
 - Manual testing required for each module
 - Test with various video formats and languages
 - Verify GPU acceleration is working
@@ -177,6 +175,6 @@ Required in `.env`:
 - `GEMINI_API_URL`: Optional custom API endpoint
 
 ## Hardware Requirements
-- AMD GPU with ROCm 7.2.0 support
+- AMD GPU with a compatible ROCm release
 - Python 3.12+
 - Sufficient GPU memory for Whisper model (large-v3-turbo recommended)
