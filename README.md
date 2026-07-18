@@ -89,9 +89,10 @@ source .venv/bin/activate
 
 `uv sync` installs the locked Python dependencies. The scripts separately patch
 the supported vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
-GPU reported by `rocminfo`, download and verify the Whisper and VAD weights, and
-check the completed environment. uv does not compile whisper.cpp or download
-model weights.
+GPU reported by `rocminfo`, download and verify the Whisper, VAD, and translation
+weights, and check the completed environment. uv does not compile whisper.cpp or
+download model weights. The translation model is stored at
+`models/Qwen3.5-9B-AWQ-4bit`.
 
 ## Audio Extraction
 
@@ -236,5 +237,5 @@ command -v ffprobe
 ```
 
 ROCm and the AMD driver are system resources and are not managed by uv. The ASR
-weights are repository-managed files under `models/whisper` and are prepared by
-`scripts/download_weights.sh`.
+and translation weights are repository-managed files under `models` and are
+prepared by `scripts/download_weights.sh`.
