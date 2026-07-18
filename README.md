@@ -176,6 +176,34 @@ VAD sample overlap: 0 s
 
 These settings are internal and fixed.
 
+## Known Issues
+
+### whisper.cpp VAD timestamps
+
+When built-in VAD removes a long silence, whisper.cpp may decode across the
+compressed boundary and map one short subtitle over the entire original gap.
+This is tracked upstream in
+[#3584](https://github.com/ggml-org/whisper.cpp/issues/3584) and
+[#3634](https://github.com/ggml-org/whisper.cpp/issues/3634).
+
+The project currently preserves these cues instead of deleting or guessing new
+timestamps, and carries no local workaround. When upstream fixes segment-level
+SRT mapping, update the pinned `WHISPER_CPP_COMMIT`, verify it against the ASR
+fixture and a representative long recording, then remove this note.
+
+### vLLM ROCm detection under WSL
+
+The pinned `vllm==0.25.1+rocm723` wheel cannot reliably detect ROCm when WSL
+blocks AMD SMI access. Its early `warning_once` calls can also enter vLLM's
+distributed modules while platform initialization is incomplete, causing a
+circular import. Upstream work is tracked in
+[#38434](https://github.com/vllm-project/vllm/pull/38434).
+
+`scripts/patch_vllm.sh` applies the version- and checksum-guarded workaround
+after `uv sync`. Once an official compatible wheel imports successfully under
+WSL and `scripts/doctor.sh` passes without that workaround, update the vLLM
+dependency and lock file, remove the patch script, and remove its setup step.
+
 ## Development
 
 Development tools are declared in the `dev` group and are not installed by the
