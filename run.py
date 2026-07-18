@@ -1,32 +1,14 @@
 import argparse
-import gc
 import shutil
 import sys
 import time
-import torch
 from pathlib import Path
-from typing import List, Optional
 
 from src.audio import AudioExtractor
 from src.clean import clean_srt
-from src.config import TRANSLATION_PROVIDER, VAD_ENABLED
 from src.logger import logger
 from src.transcribe import Transcriber
 from src.translate import create_translator
-from src.vad import (
-    VoiceActivityDetector,
-    get_clip_timestamps,
-    get_vad_settings,
-    load_vad_report,
-)
-
-
-def should_reuse_vad_report(report: dict, audio_path: Path) -> bool:
-    report_audio_path = report.get("audio_path")
-    report_settings = report.get("settings")
-    current_settings = get_vad_settings()
-
-    return report_audio_path == str(audio_path.resolve()) and report_settings == current_settings
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -46,7 +28,7 @@ VIDEO_EXTENSIONS = {
 }
 
 
-def cleanup_intermediate_files(paths: List[Path]) -> None:
+def cleanup_intermediate_files(paths: list[Path]) -> None:
     """Deletes intermediate files or directories if they exist."""
     for path in paths:
         if not path.exists():
@@ -59,16 +41,14 @@ def cleanup_intermediate_files(paths: List[Path]) -> None:
 
 def process_video(
     input_path: Path,
-    output_dir: Optional[Path],
+    output_dir: Path | None,
     target_lang: str,
-    src_lang: Optional[str],
-    model_name: str,
+    src_lang: str | None,
     keep_temp: bool,
     force: bool,
     translated_only: bool,
-    use_vad: bool,
-    provider: Optional[str] = None,
-):
+    provider: str | None = None,
+) -> None:
     """
     Processes a single video file: Extract -> Transcribe -> Clean -> Translate.
     """
@@ -81,10 +61,9 @@ def process_video(
     final_srt_name = f"{base_name}.{target_lang}.srt"
     final_srt_path = final_output_dir / final_srt_name
     temp_wav_path = final_output_dir / f"{base_name}.wav"
-    vad_report_path = final_output_dir / f"{base_name}.vad.json"
     raw_srt_path = final_output_dir / f"{base_name}.srt"
     cleaned_srt_path = final_output_dir / f"{base_name}.cleaned.srt"
-    intermediate_paths = [temp_wav_path, vad_report_path, raw_srt_path, cleaned_srt_path]
+    intermediate_paths = [temp_wav_path, raw_srt_path, cleaned_srt_path]
 
     # Check if output already exists
     if final_srt_path.exists() and not force:
@@ -112,54 +91,22 @@ def process_video(
         if raw_srt_path.exists() and not force:
             logger.info("Reusing transcription: %s", raw_srt_path)
         else:
-            clip_timestamps: Optional[list[float]] = None
-
-            if use_vad:
-                logger.info("[%s] Step 2: Detect Speech Regions", base_name)
-                vad_detector = VoiceActivityDetector()
-                if vad_report_path.exists() and not force:
-                    existing_vad_report = load_vad_report(vad_report_path)
-                    if should_reuse_vad_report(existing_vad_report, audio_path):
-                        logger.info("Reusing VAD report: %s", vad_report_path)
-                        vad_report = existing_vad_report
-                    else:
-                        logger.warning(
-                            "Existing VAD report is stale for %s. Recomputing speech regions.",
-                            audio_path.name,
-                        )
-                        vad_report = vad_detector.analyze(audio_path)
-                        vad_detector.save_report(vad_report, vad_report_path)
-                else:
-                    vad_report = vad_detector.analyze(audio_path)
-                    vad_detector.save_report(vad_report, vad_report_path)
-
-                clip_timestamps = get_clip_timestamps(vad_report)
-            else:
-                logger.info("[%s] Step 2: VAD disabled; transcribing full audio", base_name)
-
-            logger.info("[%s] Step 3: Transcribe Audio", base_name)
-            transcriber = Transcriber(model_name=model_name)
+            logger.info("[%s] Step 2: Transcribe Audio", base_name)
+            transcriber = Transcriber()
             raw_srt_path = transcriber.transcribe(
                 audio_path,
                 output_dir=final_output_dir,
                 language=src_lang,
-                verbose=False,
-                clip_timestamps=clip_timestamps,
+                quiet=False,
             )
 
-            # Free GPU memory from Whisper before potential vLLM translation
-            del transcriber
-            gc.collect()
-            torch.cuda.empty_cache()
-            logger.info("GPU memory released after transcription.")
-
-        logger.info("[%s] Step 4: Clean Subtitles", base_name)
+        logger.info("[%s] Step 3: Clean Subtitles", base_name)
         if cleaned_srt_path.exists() and not force:
             logger.info("Reusing cleaned subtitles: %s", cleaned_srt_path)
         else:
             clean_srt(raw_srt_path, output_path=cleaned_srt_path)
 
-        logger.info("[%s] Step 5: Translate to %s", base_name, target_lang)
+        logger.info("[%s] Step 4: Translate to %s", base_name, target_lang)
 
         translator = create_translator(provider)
         translator.translate_srt(
@@ -179,75 +126,76 @@ def process_video(
             cleanup_intermediate_files(intermediate_paths)
             logger.info("Cleaned intermediate files for %s.", input_path.name)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
         logger.error("Failed to process %s: %s", input_path.name, e, exc_info=True)
 
 
-def scan_directory(directory: Path) -> List[Path]:
+def scan_directory(directory: Path) -> list[Path]:
     """Recursively scans a directory and all subdirectories for supported video files."""
-    video_files = []
+    video_files: list[Path] = []
     for file in directory.rglob("*"):
         if file.is_file() and file.suffix.lower() in VIDEO_EXTENSIONS:
             video_files.append(file)
     return sorted(video_files)
 
 
-def main():
+class _Arguments(argparse.Namespace):
+    input: str = ""
+    output_dir: str | None = None
+    lang: str = "Chinese"
+    src_lang: str | None = None
+    keep_temp: bool = False
+    force: bool = False
+    translated_only: bool = False
+    provider: str | None = None
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="End-to-End Movie Subtitle Translator Pipeline."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "input", help="Path to the input video/audio file or directory."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "-o",
         "--output-dir",
         help="Directory to save the final translated subtitle. Defaults to input file's directory.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--lang",
         default="Chinese",
         help="Target language for translation (default: Chinese).",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--src-lang",
         default=None,
         help="Source language of the audio (e.g., 'en', 'zh'). Auto-detects if omitted.",
     )
-    parser.add_argument(
-        "--model",
-        default="large-v3-turbo",
-        help="Whisper model name (default: large-v3-turbo).",
-    )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--keep-temp",
         action="store_true",
         help="Keep intermediate files after successful completion.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "-f",
         "--force",
         action="store_true",
         help="Overwrite final subtitles and restart from clean intermediate files.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--translated-only",
         action="store_true",
         help="Generate translated subtitles only instead of bilingual subtitles.",
     )
-    parser.add_argument(
-        "--no-vad",
-        action="store_true",
-        help="Disable Silero VAD pre-segmentation and transcribe the full audio.",
-    )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--provider",
         choices=["gemini", "openai", "vllm"],
         default=None,
         help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=_Arguments())
 
     input_path = Path(args.input).resolve()
     if not input_path.exists():
@@ -280,11 +228,9 @@ def main():
             output_dir=output_dir,
             target_lang=args.lang,
             src_lang=args.src_lang,
-            model_name=args.model,
             keep_temp=args.keep_temp,
             force=args.force,
             translated_only=args.translated_only,
-            use_vad=VAD_ENABLED and not args.no_vad,
             provider=args.provider,
         )
 
