@@ -16,8 +16,8 @@ source .venv/bin/activate
 # Full pipeline (extract -> transcribe -> clean -> translate)
 python run.py /path/to/video.mp4
 
-# With custom output directory and language
-python run.py /path/to/movie.mkv --output-dir ./subs --lang ja
+# With custom output directory and explicit source and target languages
+python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
 
 # Keep temporary files for debugging
 python run.py /path/to/video.mp4 --keep-temp
@@ -32,7 +32,10 @@ python run.py /path/to/videos/
 python -m src.audio /path/to/video.mp4 -o output.wav
 
 # Transcribe audio only
-python -m src.transcribe /path/to/audio.wav -o ./subs -m large-v3-turbo
+python -m src.transcribe /path/to/audio.wav -o ./subs
+
+# Transcribe audio with an explicit language code
+python -m src.transcribe /path/to/audio.wav -o ./subs -l de
 
 # Clean subtitles only
 python -m src.clean /path/to/subs.srt -o cleaned.srt
@@ -50,13 +53,20 @@ uv python install 3.12
 uv lock --managed-python
 
 # Create the development environment from the committed lock file
-uv sync --locked --managed-python --group dev
+uv sync --locked --managed-python --group dev --group vllm
 
 # Activate virtual environment
 source .venv/bin/activate
+
+# Prepare and verify the managed native ASR runtime
+./scripts/patch_vllm.sh
+./scripts/install_whisper_cli.sh
+./scripts/download_weights.sh
+./scripts/doctor.sh
 ```
 
-The ROCm ASR dependency group will be added after the ASR backend is selected.
+The ASR executable and weights are installed separately from uv-managed Python
+dependencies. Omit the source language to use whisper.cpp auto-detection.
 
 ## Code Style Guidelines
 
@@ -104,7 +114,6 @@ The ROCm ASR dependency group will be added after the ASR backend is selected.
 
 ### Classes and Methods
 - Include docstrings for all classes and public methods
-- Use lazy loading for heavy resources (e.g., Whisper models)
 - Keep methods focused and single-purpose
 - Use type hints for all parameters and return values
 
@@ -149,7 +158,7 @@ The ROCm ASR dependency group will be added after the ASR backend is selected.
 ### Module Responsibilities
 - `run.py`: Orchestration and CLI entry point
 - `src/audio.py`: Audio extraction with FFmpeg
-- `src/transcribe.py`: Whisper-based transcription
+- `src/transcribe.py`: Fixed whisper.cpp adapter using `.venv/bin/whisper-cli` and managed weights under `models/whisper`
 - `src/clean.py`: Subtitle text cleaning and filtering
 - `src/translate.py`: Gemini API translation with concurrency
 - `src/config.py`: Configuration and environment variables
@@ -163,11 +172,10 @@ The ROCm ASR dependency group will be added after the ASR backend is selected.
 5. Final SRT output
 
 ### Performance Considerations
-- Whisper models are loaded lazily to save memory
+- ASR runs through the fixed HIP whisper.cpp profile with built-in VAD and native progress reporting
 - Translation uses concurrent API calls (default: 10 workers)
 - Batch size for translation: 30 lines per request
 - FFmpeg extraction shows real-time progress
-- Use fp16=True for GPU acceleration when available
 
 ## Environment Variables
 Required in `.env`:
@@ -177,4 +185,4 @@ Required in `.env`:
 ## Hardware Requirements
 - AMD GPU with a compatible ROCm release
 - Python 3.12+
-- Sufficient GPU memory for Whisper model (large-v3-turbo recommended)
+- Sufficient GPU memory for the managed Whisper large-v3-turbo model

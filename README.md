@@ -5,12 +5,11 @@ Generate, clean, and translate movie subtitles on AMD Radeon GPUs under WSL.
 The pipeline is:
 
 ```text
-video -> FFmpeg audio extraction -> VAD -> ASR -> subtitle cleanup -> translation
+video -> FFmpeg audio extraction -> ASR -> subtitle cleanup -> translation
 ```
 
-The current uv configuration intentionally contains only the lightweight
-dependencies required to develop and test audio extraction. The ROCm ASR stack
-will be added after the ASR backend and benchmark plan are finalized.
+The integrated ASR backend is whisper.cpp built with HIP, using its built-in
+Silero VAD. The standalone Python Silero stage has been removed.
 
 ## Requirements
 
@@ -77,6 +76,23 @@ cp .env.template .env
 
 Add `GEMINI_API_KEY` to `.env`. The file is ignored by Git.
 
+Prepare the full ROCm environment and the managed ASR runtime:
+
+```bash
+uv sync --locked --managed-python --group vllm
+source .venv/bin/activate
+./scripts/patch_vllm.sh
+./scripts/install_whisper_cli.sh
+./scripts/download_weights.sh
+./scripts/doctor.sh
+```
+
+`uv sync` installs the locked Python dependencies. The scripts separately patch
+the supported vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
+GPU reported by `rocminfo`, download and verify the Whisper and VAD weights, and
+check the completed environment. uv does not compile whisper.cpp or download
+model weights.
+
 ## Audio Extraction
 
 The base environment is sufficient to exercise FFmpeg audio extraction:
@@ -89,25 +105,63 @@ The output is 16 kHz, mono, 16-bit PCM WAV for downstream ASR processing.
 
 ## Full Pipeline
 
-The following commands require the future ROCm ASR dependency group in addition
-to the base environment:
+The full pipeline uses the managed whisper.cpp backend:
 
 ```bash
-uv run --managed-python python run.py /path/to/video.mp4
-uv run --managed-python python run.py /path/to/movie.mkv --output-dir ./subs --lang Chinese
-uv run --managed-python python run.py /path/to/video.mp4 --keep-temp
-uv run --managed-python python run.py /path/to/video.mp4 --no-vad
-uv run --managed-python python run.py /path/to/video.mp4 --translated-only
+python run.py /path/to/video.mp4
+python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
+python run.py /path/to/video.mp4 --keep-temp
+python run.py /path/to/video.mp4 --translated-only
 ```
 
 Useful options:
 
-- `--src-lang`: source language; auto-detected when omitted
-- `--model`: ASR model name
-- `--keep-temp`: preserve intermediate WAV, VAD, and SRT files
+- `--src-lang`: source language code; whisper.cpp auto-detects it when omitted
+- `--keep-temp`: preserve intermediate WAV and SRT files
 - `--force`: overwrite output and rebuild intermediates
 - `--translated-only`: omit source text from the final subtitles
-- `--no-vad`: bypass VAD and transcribe the complete audio
+
+## Standalone Transcription
+
+Transcribe a prepared audio file with automatic source-language detection or an
+explicit language code:
+
+```bash
+python -m src.transcribe /path/to/audio.wav -o ./subs
+python -m src.transcribe /path/to/audio.wav -o ./subs -l de
+python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
+```
+
+The command displays native transcription progress by default. `--quiet` hides
+the Python progress bar without changing transcription behavior.
+
+## Managed whisper.cpp ASR Profile
+
+The project intentionally exposes one fixed ASR profile rather than public
+model or device selection. Its managed assets are:
+
+```text
+.venv/bin/whisper-cli
+models/whisper/ggml-large-v3-turbo.bin
+models/whisper/ggml-silero-v6.2.0.bin
+```
+
+The quality-oriented decoder and VAD settings are:
+
+```text
+model: large-v3-turbo
+processors: 1
+beam size: 5
+max context: 48
+VAD threshold: 0.15
+VAD minimum speech: 250 ms
+VAD minimum silence: 120 ms
+VAD maximum speech: 30 s
+VAD speech padding: 250 ms
+VAD sample overlap: 0 s
+```
+
+These settings are internal and fixed.
 
 ## Development
 
@@ -140,5 +194,6 @@ command -v ffmpeg
 command -v ffprobe
 ```
 
-ROCm, the AMD driver, and model caches are system or machine resources and are
-not managed by uv.
+ROCm and the AMD driver are system resources and are not managed by uv. The ASR
+weights are repository-managed files under `models/whisper` and are prepared by
+`scripts/download_weights.sh`.
