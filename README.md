@@ -135,6 +135,19 @@ python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
 The command displays native transcription progress by default. `--quiet` hides
 the Python progress bar without changing transcription behavior.
 
+## Subtitle Cleanup
+
+Run conservative SRT cleanup independently with:
+
+```bash
+python -m src.clean /path/to/subtitles.srt -o cleaned.srt
+```
+
+Cleanup trims surrounding whitespace, removes empty or punctuation-only cues,
+and removes cues made from four or more identical effective characters. Two
+identical consecutive cues are merged when their gap is at most 250 ms; close
+runs of three or more identical cues are discarded. Other content is preserved.
+
 ## Managed whisper.cpp ASR Profile
 
 The project intentionally exposes one fixed ASR profile rather than public

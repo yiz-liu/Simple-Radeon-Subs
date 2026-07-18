@@ -1,192 +1,190 @@
 import argparse
 import re
+from itertools import pairwise
 from pathlib import Path
-from typing import List, Optional
+from typing import Final, final
 
 import pysrt
-from tqdm import tqdm
 
 from src.logger import logger
 
+DUPLICATE_MERGE_GAP_MS: Final = 250
+EXCESSIVE_REPETITION_LENGTH: Final = 4
+LONG_SUBTITLE_DURATION_MS: Final = 30_000
+NON_WORD_PATTERN: Final = re.compile(r"[^\w]", flags=re.UNICODE)
+
+
+@final
+class InvalidSubtitleTimelineError(ValueError):
+    """Raised when an SRT cue has a non-positive duration."""
+
+    def __init__(self, subtitle_index: int, start_ms: int, end_ms: int) -> None:
+        self.subtitle_index = subtitle_index
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        message = (
+            f"Subtitle {subtitle_index} has a non-positive duration: "
+            + f"{start_ms}ms -> {end_ms}ms"
+        )
+        super().__init__(message)
+
 
 def clean_text(text: str) -> str:
-    """
-    Cleans the subtitle text by removing SDH tags, HTML tags, and common hallucinations.
-    """
-    # 1. Remove HTML tags
-    text = re.sub(r"<[^>]+>", "", text)
+    """Remove surrounding whitespace without changing subtitle content."""
+    return text.strip()
 
-    # 2. Remove SDH tags (e.g., [Music], (Applause), *Cheering*)
-    # Text inside square brackets
-    text = re.sub(r"\[.*?\]", "", text)
-    # Text inside parentheses (careful not to remove legitimate dialog)
-    # Heuristic: If it's all uppercase or clearly sound description
-    text = re.sub(r"\([A-Z\s]+\)", "", text)
-    # Text inside asterisks
-    text = re.sub(r"\*.*?\*", "", text)
-    # Music notes
-    text = re.sub(r"[♪♫♬]", "", text)
 
-    # 3. Remove common Whisper hallucinations / Metadata
-    hallucinations = [
-        "Subtitle by",
-        "Translated by",
-        "Amara.org",
-        "Captioning by",
-        "www.",
-        ".com",
-        "Sync and corrections by",
-    ]
-    for h in hallucinations:
-        if h.lower() in text.lower():
-            return ""  # Treat as garbage line
-
-    # 4. Remove excessive whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-
-    return text
+def _effective_text(text: str) -> str:
+    return NON_WORD_PATTERN.sub("", text).replace("_", "").casefold()
 
 
 def is_garbage(text: str) -> bool:
-    """Returns True if the line should be removed completely."""
-    if not text:
-        return True
-    # If it's just punctuation
-    if re.fullmatch(r"[^\w\s]+", text):
-        return True
-    # If it's too short (e.g. single letter like "a" or "I" might be valid, but "t" isn't)
-    # Heuristic: Keep it simple for now.
-    return False
+    """Return whether a cue is empty or contains punctuation only."""
+    return not _effective_text(text)
 
 
-def is_filler(text: str) -> bool:
-    """Detects low-information filler text using structure signals only. Language-agnostic."""
-    # Strip non-word characters (punctuation, symbols, spaces), keep unicode word chars
-    stripped = re.sub(r'[^\w]', '', text, flags=re.UNICODE).replace('_', '')
-    if not stripped:
-        return True
-    # Rule A: effective char count <= 1
-    if len(stripped) <= 1:
-        return True
-    # Rule B: all characters identical (e.g. "ああ", "ooo", "!!!")
-    if len(set(stripped)) == 1:
-        return True
-    # Rule C: multi-word but all words identical (e.g. "no no no", "you you you")
-    words = text.strip().split()
-    if len(words) >= 2 and len(set(w.lower() for w in words)) == 1:
-        return True
-    return False
-
-
-def is_duration_anomaly(sub: pysrt.SubRipItem) -> bool:
-    """Detects segments with implausibly low speech density (long duration, tiny text)."""
-    duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
-    if duration <= 0:
-        return True
-    chars = len(sub.text.strip())
-    if duration > 5.0 and chars / duration < 0.5:
-        return True
-    return False
+def is_excessive_repetition(text: str) -> bool:
+    """Return whether four or more effective characters are all identical."""
+    effective_text = _effective_text(text)
+    return (
+        len(effective_text) >= EXCESSIVE_REPETITION_LENGTH
+        and len(set(effective_text)) == 1
+    )
 
 
 def filter_consecutive_duplicates(
-    subs: List[pysrt.SubRipItem],
-    discard_threshold: int = 3,
-) -> List[pysrt.SubRipItem]:
-    """
-    Handles consecutive duplicate subtitles:
-    - run >= discard_threshold: discard entirely (non-linguistic filler)
-    - run == 2: merge into one extended entry
-    - run == 1: keep as-is
-    """
-    if not subs:
-        return []
-    result = []
-    i = 0
-    while i < len(subs):
-        j = i + 1
-        while j < len(subs) and subs[j].text.strip() == subs[i].text.strip():
-            j += 1
-        run_length = j - i
-        if run_length >= discard_threshold:
-            pass  # discard entire run
+    subtitles: list[pysrt.SubRipItem],
+) -> list[pysrt.SubRipItem]:
+    """Merge close duplicate pairs and discard close runs of three or more."""
+    filtered: list[pysrt.SubRipItem] = []
+    run_start = 0
+
+    while run_start < len(subtitles):
+        run_end = run_start + 1
+        while run_end < len(subtitles):
+            previous = subtitles[run_end - 1]
+            current = subtitles[run_end]
+            gap_ms = current.start.ordinal - previous.end.ordinal
+            if (
+                current.text != previous.text
+                or not 0 <= gap_ms <= DUPLICATE_MERGE_GAP_MS
+            ):
+                break
+            run_end += 1
+
+        run_length = run_end - run_start
+        if run_length == 1:
+            filtered.append(subtitles[run_start])
         elif run_length == 2:
-            merged = subs[i]
-            merged.end = subs[j - 1].end
-            result.append(merged)
-        else:
-            result.append(subs[i])
-        i = j
-    return result
+            first = subtitles[run_start]
+            last = subtitles[run_end - 1]
+            filtered.append(
+                pysrt.SubRipItem(
+                    index=first.index,
+                    start=first.start,
+                    end=last.end,
+                    text=first.text,
+                    position=first.position,
+                )
+            )
+
+        run_start = run_end
+
+    return filtered
 
 
-def clean_srt(file_path: Path, output_path: Optional[Path] = None):
-    try:
-        subs = pysrt.open(str(file_path))
-    except Exception as e:
-        logger.error("Error loading %s: %s", file_path, e)
-        return
+def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
+    """Conservatively normalize an SRT while preserving uncertain content."""
+    input_file = file_path.resolve()
+    output_file = output_path.resolve() if output_path is not None else input_file
+    subtitles: pysrt.SubRipFile = pysrt.open(str(input_file), encoding="utf-8")
+    original_count = len(subtitles)
+    normalized: list[pysrt.SubRipItem] = []
 
-    original_count = len(subs)
+    subtitle: pysrt.SubRipItem
+    for subtitle in subtitles:
+        start_ms = subtitle.start.ordinal
+        end_ms = subtitle.end.ordinal
+        if end_ms <= start_ms:
+            raise InvalidSubtitleTimelineError(subtitle.index, start_ms, end_ms)
 
-    # Step 1: Clean text, filter garbage and filler
-    cleaned_subs = []
-    for sub in tqdm(subs, desc="Cleaning", unit="line"):
-        cleaned_text = clean_text(sub.text)
-        if is_garbage(cleaned_text) or is_filler(cleaned_text):
+        text = clean_text(subtitle.text)
+        if is_garbage(text) or is_excessive_repetition(text):
             continue
-        sub.text = cleaned_text
-        cleaned_subs.append(sub)
+        normalized.append(
+            pysrt.SubRipItem(
+                index=subtitle.index,
+                start=subtitle.start,
+                end=subtitle.end,
+                text=text,
+                position=subtitle.position,
+            )
+        )
 
-    count_after_text = len(cleaned_subs)
+    final_subtitles = filter_consecutive_duplicates(normalized)
+    for index, subtitle in enumerate(final_subtitles, start=1):
+        subtitle.index = index
 
-    # Step 2: Duration anomaly filter
-    duration_filtered = [
-        sub for sub in cleaned_subs if not is_duration_anomaly(sub)
-    ]
-    count_after_duration = len(duration_filtered)
+    long_duration_count = sum(
+        subtitle.end.ordinal - subtitle.start.ordinal > LONG_SUBTITLE_DURATION_MS
+        for subtitle in final_subtitles
+    )
+    overlap_count = sum(
+        current.start.ordinal < previous.end.ordinal
+        for previous, current in pairwise(final_subtitles)
+    )
 
-    # Step 3: Filter consecutive duplicates
-    final_subs = filter_consecutive_duplicates(duration_filtered)
+    pysrt.SubRipFile(items=final_subtitles).save(
+        str(output_file),
+        encoding="utf-8",
+    )
 
-    # Step 4: Re-index
-    for i, sub in enumerate(final_subs):
-        sub.index = i + 1
-
-    # Step 5: Save
-    out_file = output_path or file_path
-    pysrt.SubRipFile(items=final_subs).save(str(out_file), encoding="utf-8")
-
+    if long_duration_count:
+        logger.warning(
+            "Preserved %d subtitle(s) longer than 30 seconds.",
+            long_duration_count,
+        )
+    if overlap_count:
+        logger.warning(
+            "Preserved %d overlapping subtitle(s).",
+            overlap_count,
+        )
     logger.info(
-        "Result: %d -> %d (text filter) -> %d (duration filter) -> %d (dedup) lines.",
+        "Cleaned subtitles: %d input, %d safely filtered, "
+        + "%d merged or duplicate-filtered, %d output.",
         original_count,
-        count_after_text,
-        count_after_duration,
-        len(final_subs),
+        original_count - len(normalized),
+        len(normalized) - len(final_subtitles),
+        len(final_subtitles),
     )
 
 
-def main():
+class _Arguments(argparse.Namespace):
+    input: str = ""
+    output: str | None = None
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Clean SRT subtitles (Remove SDH, HTML, Hallucinations)."
+        description="Conservatively normalize SRT subtitles."
     )
-    parser.add_argument("input", help="Path to the input SRT file.")
-    parser.add_argument(
+    _ = parser.add_argument("input", help="Path to the input SRT file.")
+    _ = parser.add_argument(
         "-o",
         "--output",
-        help="Path to the output SRT file (optional, defaults to inplace).",
+        help="Path to the output SRT file (defaults to in-place).",
     )
+    arguments = parser.parse_args(namespace=_Arguments())
+    input_path = Path(arguments.input).resolve()
+    output_path = Path(arguments.output).resolve() if arguments.output else None
 
-    args = parser.parse_args()
-    input_path = Path(args.input).resolve()
-    output_path = Path(args.output).resolve() if args.output else None
-
-    if not input_path.exists():
-        logger.error("Error: %s not found.", input_path)
-        exit(1)
-
-    clean_srt(input_path, output_path)
+    try:
+        clean_srt(input_path, output_path)
+    except (OSError, UnicodeError, pysrt.Error, InvalidSubtitleTimelineError) as error:
+        logger.error("Subtitle cleaning failed: %s", error)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

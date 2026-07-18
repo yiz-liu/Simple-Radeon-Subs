@@ -159,7 +159,7 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - `run.py`: Orchestration and CLI entry point
 - `src/audio.py`: Audio extraction with FFmpeg
 - `src/transcribe.py`: Fixed whisper.cpp adapter using `.venv/bin/whisper-cli` and managed weights under `models/whisper`
-- `src/clean.py`: Subtitle text cleaning and filtering
+- `src/clean.py`: Conservative SRT normalization and duplicate filtering
 - `src/translate.py`: Gemini API translation with concurrency
 - `src/config.py`: Configuration and environment variables
 - `src/logger.py`: Logging setup
@@ -167,7 +167,7 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 ### Data Flow
 1. Video file → Audio extraction (WAV)
 2. WAV → Whisper transcription (SRT)
-3. SRT → Text cleaning (remove SDH, HTML, hallucinations)
+3. SRT → Conservative cleanup (trim, safe filtering, time-aware deduplication)
 4. Cleaned SRT → Gemini translation (concurrent batches)
 5. Final SRT output
 
