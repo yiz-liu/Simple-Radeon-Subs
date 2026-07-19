@@ -6,12 +6,13 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Final
 
 import pysrt
 
 from src.config import TRANSLATION_MODEL_PATH
 from src.logger import logger
+from src.translation_output import _build_final_subtitles, _save_subtitles
 from src.translation_requests import (
     TranslationOutputError,
     TranslationRequest,
@@ -22,9 +23,16 @@ from src.translation_requests import (
 
 if TYPE_CHECKING:
     from vllm import LLM
-    from vllm.outputs import RequestOutput
 
 MODEL_CONTEXT_LENGTH: Final = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceResult:
+    """Normalized text returned from the native vLLM boundary."""
+
+    text: str | None
+    finish_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +43,34 @@ class TranslationOptions:
     translated_only: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class TranslationTask:
+    """One prepared SRT and its final translated destination."""
+
+    input_path: Path
+    output_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationFailure:
+    """A translation failure scoped to one subtitle file."""
+
+    task: TranslationTask
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedTranslation:
+    task: TranslationTask
+    subtitles: pysrt.SubRipFile
+    requests: tuple[TranslationRequest, ...]
+
+
 DEFAULT_TRANSLATION_OPTIONS: Final = TranslationOptions()
 
 
-@final
 class VLLMTranslator:
-    """Translate subtitles with the managed local vLLM model."""
+    """Translate subtitle batches with one managed local vLLM engine."""
 
     def __init__(self, model_path: Path = TRANSLATION_MODEL_PATH) -> None:
         self.model_path = model_path.resolve()
@@ -48,65 +78,104 @@ class VLLMTranslator:
             raise FileNotFoundError(f"vLLM model not found: {self.model_path}")
         self._llm: LLM | None = None
 
+    def translate_many(
+        self,
+        tasks: Sequence[TranslationTask],
+        options: TranslationOptions = DEFAULT_TRANSLATION_OPTIONS,
+    ) -> list[TranslationFailure]:
+        """Translate multiple SRT files with one inference submission."""
+        failures: list[TranslationFailure] = []
+        pending: list[_PreparedTranslation] = []
+        for task in tasks:
+            try:
+                item = self._prepare_task(task)
+                if item.requests:
+                    pending.append(item)
+                else:
+                    _save_subtitles(item.task.output_path, item.subtitles)
+            except (OSError, UnicodeError, pysrt.Error) as error:
+                failures.append(TranslationFailure(task, str(error)))
+
+        if not pending:
+            return failures
+
+        requests = tuple(request for item in pending for request in item.requests)
+        owners = tuple(
+            index for index, item in enumerate(pending) for _ in item.requests
+        )
+        logger.info(
+            "Translating %d subtitle file(s) in %d requests via vLLM (model: %s).",
+            len(pending),
+            len(requests),
+            self.model_path.name,
+        )
+        try:
+            outputs = self._run_inference(requests, options.target_lang)
+            results: list[list[TranslationResult]] = [[] for _ in pending]
+            reasons: dict[int, str] = {}
+            for request, output, owner in zip(requests, outputs, owners, strict=True):
+                if owner in reasons:
+                    continue
+                try:
+                    results[owner].append(self._parse_output(request, output))
+                except TranslationOutputError as error:
+                    reasons[owner] = str(error)
+
+            for index, item in enumerate(pending):
+                reason = reasons.get(index)
+                if reason is not None:
+                    failures.append(TranslationFailure(item.task, reason))
+                    continue
+                try:
+                    translations = self._reassemble_subtitles(
+                        len(item.subtitles),
+                        results[index],
+                    )
+                    final = _build_final_subtitles(
+                        item.subtitles,
+                        translations,
+                        options.translated_only,
+                    )
+                    _save_subtitles(item.task.output_path, final)
+                except (
+                    OSError,
+                    UnicodeError,
+                    pysrt.Error,
+                    TranslationOutputError,
+                ) as error:
+                    failures.append(TranslationFailure(item.task, str(error)))
+            return failures
+        finally:
+            self._release_engine()
+
     def translate_srt(
         self,
         input_path: Path,
         output_path: Path,
         options: TranslationOptions = DEFAULT_TRANSLATION_OPTIONS,
     ) -> None:
-        """Translate an SRT file while preserving every source timestamp."""
-        logger.info("Loading %s...", input_path.name)
-        subs = pysrt.open(str(input_path.resolve()))
-        if not subs:
-            logger.warning("No subtitles found to translate.")
-            subs.save(str(output_path), encoding="utf-8")
-            return
-
-        requests = build_translation_requests(
-            tuple(sub.text.replace("\n", " ") for sub in subs)
+        """Translate one SRT while preserving every source timestamp."""
+        failures = self.translate_many(
+            (TranslationTask(input_path, output_path),), options
         )
-        logger.info(
-            "Translating %d segments in %d overlapping requests via vLLM (model: %s).",
-            len(subs),
-            len(requests),
-            self.model_path.name,
-        )
-        try:
-            outputs = self._run_inference(requests, options.target_lang)
-            results = self._parse_outputs(requests, outputs)
-        finally:
-            self._release_engine()
+        if failures:
+            raise TranslationOutputError(failures[0].reason)
 
-        translated_lines = self._reassemble_subtitles(len(subs), results)
-        final_items: list[pysrt.SubRipItem] = []
-        for sub, translated_text in zip(subs, translated_lines, strict=True):
-            source_text = sub.text.strip()
-            final_text = translated_text
-            if not options.translated_only and source_text:
-                final_text = f"{source_text}\n{translated_text}"
-            final_items.append(
-                pysrt.SubRipItem(
-                    index=len(final_items) + 1,
-                    start=sub.start,
-                    end=sub.end,
-                    text=final_text,
-                    position=sub.position,
-                )
+    def _prepare_task(self, task: TranslationTask) -> _PreparedTranslation:
+        subtitles = pysrt.open(str(task.input_path.resolve()), encoding="utf-8")
+        requests = tuple(
+            build_translation_requests(
+                tuple(subtitle.text.replace("\n", " ") for subtitle in subtitles)
             )
-
-        logger.info("Saving to %s...", output_path.name)
-        pysrt.SubRipFile(items=final_items).save(
-            str(output_path.resolve()),
-            encoding="utf-8",
         )
+        return _PreparedTranslation(task, subtitles, requests)
 
     def _run_inference(
         self,
         requests: Sequence[TranslationRequest],
         target_lang: str,
-    ) -> list[RequestOutput]:
+    ) -> list[InferenceResult]:
         llm = self._load_engine()
-
         from vllm import SamplingParams
         from vllm.sampling_params import StructuredOutputsParams
 
@@ -124,17 +193,25 @@ class VLLMTranslator:
             )
             for request in requests
         ]
-        return llm.chat(
+        raw_outputs = llm.chat(
             [request.messages(target_lang) for request in requests],
             sampling_params=sampling_params,
             chat_template_kwargs={"enable_thinking": False},
             use_tqdm=True,
         )
+        return [
+            InferenceResult(
+                text=output.outputs[0].text if output.outputs else None,
+                finish_reason=(
+                    output.outputs[0].finish_reason if output.outputs else None
+                ),
+            )
+            for output in raw_outputs
+        ]
 
     def _load_engine(self) -> LLM:
         if self._llm is not None:
             return self._llm
-
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         from vllm import LLM
 
@@ -158,26 +235,23 @@ class VLLMTranslator:
             return
         self._llm = None
         _ = gc.collect()
-
         import torch
 
         torch.cuda.empty_cache()
         logger.info("vLLM model unloaded, GPU memory released.")
 
     @staticmethod
-    def _parse_outputs(
-        requests: Sequence[TranslationRequest],
-        outputs: Sequence[RequestOutput],
-    ) -> list[TranslationResult]:
-        results: list[TranslationResult] = []
-        for request, output in zip(requests, outputs, strict=True):
-            generated = output.outputs[0]
-            if generated.finish_reason != "stop":
-                raise TranslationOutputError(
-                    f"Translation request stopped with {generated.finish_reason!r}"
-                )
-            results.append(parse_translation_output(generated.text.strip(), request))
-        return results
+    def _parse_output(
+        request: TranslationRequest,
+        output: InferenceResult,
+    ) -> TranslationResult:
+        if output.text is None:
+            raise TranslationOutputError("Translation request returned no output")
+        if output.finish_reason != "stop":
+            raise TranslationOutputError(
+                f"Translation request stopped with {output.finish_reason!r}"
+            )
+        return parse_translation_output(output.text.strip(), request)
 
     @staticmethod
     def _reassemble_subtitles(
@@ -187,7 +261,9 @@ class VLLMTranslator:
         translations = [""] * subtitle_count
         for result in results:
             stop_index = result.start_index + len(result.texts)
-            translations[result.start_index:stop_index] = result.texts
+            translations[result.start_index : stop_index] = result.texts
         if any(not text for text in translations):
-            raise TranslationOutputError("Translation results do not cover every subtitle")
+            raise TranslationOutputError(
+                "Translation results do not cover every subtitle"
+            )
         return translations
