@@ -117,6 +117,21 @@ Translation is fully local and uses the managed model at
 `models/Qwen3.5-9B-AWQ-4bit`. The application does not send subtitle content to
 an online service.
 
+## Local Translation
+
+Translate a prepared SRT file independently with:
+
+```bash
+python -m src.translate /path/to/subtitles.srt -o translated.srt --lang Chinese
+python -m src.translate /path/to/subtitles.srt --lang French --translated-only
+```
+
+The backend uses a fixed vLLM profile. Each request owns 16 subtitle cues and
+includes up to four translated cues of context on either side. Structured
+output preserves the cue mapping, and incomplete responses are rejected instead
+of being written as partial subtitles. Request sizing is intentionally not a
+CLI option.
+
 ## Standalone Transcription
 
 Transcribe a prepared audio file with automatic source-language detection or an

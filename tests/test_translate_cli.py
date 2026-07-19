@@ -16,5 +16,6 @@ def test_translation_cli_exposes_only_the_local_backend(command: list[str]) -> N
         text=True,
     )
 
-    # Then: There is no runtime backend selector for online services.
+    # Then: Model and request sizing remain fixed by the managed backend.
     assert "--provider" not in result.stdout
+    assert "--batch-size" not in result.stdout

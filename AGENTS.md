@@ -148,6 +148,7 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - `src/clean.py`: Conservative SRT normalization and duplicate filtering
 - `src/translate.py`: CLI for the fixed local vLLM translation backend
 - `src/translation.py`: Subtitle batching and local vLLM inference
+- `src/translation_requests.py`: Overlapping request windows and structured output parsing
 - `src/config.py`: Managed paths and runtime constants
 - `src/logger.py`: Logging setup
 
@@ -161,7 +162,7 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 ### Performance Considerations
 - ASR runs through the fixed HIP whisper.cpp profile with built-in VAD and native progress reporting
 - Translation submits all subtitle batches to the local vLLM scheduler
-- Batch size for translation: 16 lines per prompt
+- Translation requests use 16 core lines plus up to 4 overlapping lines per side
 - FFmpeg extraction shows real-time progress
 
 ## Hardware Requirements
