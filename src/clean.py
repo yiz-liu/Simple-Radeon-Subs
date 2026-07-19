@@ -10,8 +10,10 @@ from src.logger import logger
 
 DUPLICATE_MERGE_GAP_MS: Final = 250
 EXCESSIVE_REPETITION_LENGTH: Final = 4
+PHRASE_LOOP_TEXT_LENGTH: Final = 32
 LONG_SUBTITLE_DURATION_MS: Final = 30_000
 NON_WORD_PATTERN: Final = re.compile(r"[^\w]", flags=re.UNICODE)
+PHRASE_LOOP_PATTERN: Final = re.compile(r"(.{2,8})\1{3,}")
 
 
 @final
@@ -44,11 +46,14 @@ def is_garbage(text: str) -> bool:
 
 
 def is_excessive_repetition(text: str) -> bool:
-    """Return whether four or more effective characters are all identical."""
+    """Return whether effective text is an excessive character or phrase loop."""
     effective_text = _effective_text(text)
     return (
         len(effective_text) >= EXCESSIVE_REPETITION_LENGTH
         and len(set(effective_text)) == 1
+    ) or (
+        len(effective_text) >= PHRASE_LOOP_TEXT_LENGTH
+        and PHRASE_LOOP_PATTERN.search(effective_text) is not None
     )
 
 
@@ -97,7 +102,17 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
     """Conservatively normalize an SRT while preserving uncertain content."""
     input_file = file_path.resolve()
     output_file = output_path.resolve() if output_path is not None else input_file
-    subtitles: pysrt.SubRipFile = pysrt.open(str(input_file), encoding="utf-8")
+    raw_content = input_file.read_bytes()
+    try:
+        content = raw_content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        logger.warning(
+            "Recovered invalid UTF-8 in subtitle input %s at byte %d.",
+            input_file,
+            error.start,
+        )
+        content = raw_content.decode("utf-8", errors="replace")
+    subtitles: pysrt.SubRipFile = pysrt.from_string(content)
     original_count = len(subtitles)
     normalized: list[pysrt.SubRipItem] = []
 

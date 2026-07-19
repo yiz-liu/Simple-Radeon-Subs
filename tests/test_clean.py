@@ -68,6 +68,47 @@ def test_clean_srt_removes_only_empty_punctuation_and_excessive_repetition(
     assert [(item.index, item.text) for item in cleaned] == [(1, "ooo")]
 
 
+def test_clean_srt_recovers_invalid_utf8(tmp_path: Path) -> None:
+    # Given: A native SRT containing one incomplete UTF-8 sequence.
+    input_path = tmp_path / "input.srt"
+    output_path = tmp_path / "output.srt"
+    input_path.write_bytes(
+        b"1\n00:00:00,000 --> 00:00:01,000\n"
+        + "前".encode()
+        + b"\xe3\x81"
+        + "後\n".encode()
+    )
+
+    # When: The cleaner reads the malformed native output.
+    clean_srt(input_path, output_path)
+
+    # Then: Surrounding text is preserved in a valid UTF-8 SRT.
+    cleaned = pysrt.open(str(output_path), encoding="utf-8")
+    assert [item.text for item in cleaned] == ["前�後"]
+
+
+def test_clean_srt_removes_only_qualifying_phrase_loops(tmp_path: Path) -> None:
+    # Given: Phrase loops around the text-length, phrase-length, and repeat boundaries.
+    items = [
+        _subtitle(1, (0, 1_000), "走吧！" * 16),
+        _subtitle(2, (1_000, 2_000), "abcdefgh" * 4),
+        _subtitle(3, (2_000, 3_000), "abcdefghi" * 4),
+        _subtitle(4, (3_000, 4_000), "abcdefgh" * 3 + "ijklmnop"),
+        _subtitle(5, (4_000, 5_000), "走吧！" * 15),
+    ]
+
+    # When: The conservative cleaner processes them.
+    cleaned = _clean(tmp_path, items)
+
+    # Then: Only effective text of at least 32 characters with a 2-8 character
+    # phrase repeated four times is removed.
+    assert [item.text for item in cleaned] == [
+        "abcdefghi" * 4,
+        "abcdefgh" * 3 + "ijklmnop",
+        "走吧！" * 15,
+    ]
+
+
 @pytest.mark.parametrize(
     ("gap_ms", "expected_count"),
     ((250, 1), (251, 2)),
