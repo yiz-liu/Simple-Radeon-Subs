@@ -10,7 +10,8 @@ import pytest
 from tqdm import tqdm
 
 import src.transcribe as transcribe_module
-from src.transcribe import Transcriber
+import src.whisper_batch as whisper_batch_module
+from src.transcribe import Transcriber, TranscriptionTask
 
 FAKE_WHISPER: Final = """#!/usr/bin/env python3
 import os
@@ -22,24 +23,25 @@ arguments = sys.argv[1:]
 Path(os.environ["FAKE_RECORD"]).write_text("\\n".join(arguments), encoding="utf-8")
 Path(os.environ["FAKE_PID"]).write_text(str(os.getpid()), encoding="utf-8")
 scenario = os.environ.get("FAKE_SCENARIO", "success")
-prefix = arguments[arguments.index("--output-file") + 1]
+audio_paths = arguments[arguments.index("--print-progress") + 1:]
 
 if scenario == "diagnostics":
     for index in range(80):
         print(f"diagnostic {index}:" + "x" * 100, file=sys.stderr, flush=True)
     raise SystemExit(7)
 
-for line in os.environ.get("FAKE_PROGRESS", "").split("|"):
-    if line:
-        print(line, file=sys.stderr, flush=True)
-
-if scenario == "linger":
-    while True:
-        time.sleep(60)
-if scenario == "failure":
-    raise SystemExit(7)
-if scenario == "success":
-    Path(f"{prefix}.srt").write_text(os.environ.get("FAKE_SRT", ""), encoding="utf-8")
+for index, audio_path in enumerate(audio_paths):
+    print(f"read_audio_data: reading audio data from '{audio_path}' ...", file=sys.stderr, flush=True)
+    for line in os.environ.get("FAKE_PROGRESS", "").split("|"):
+        if line:
+            print(line, file=sys.stderr, flush=True)
+    if scenario == "linger":
+        while True:
+            time.sleep(60)
+    if scenario == "failure":
+        raise SystemExit(7)
+    if scenario == "success" and index != int(os.environ.get("FAKE_SKIP_INDEX", "-1")):
+        Path(f"{audio_path}.srt").write_text(os.environ.get("FAKE_SRT", ""), encoding="utf-8")
 """
 
 
@@ -122,18 +124,13 @@ def test_transcribe_uses_the_fixed_profile_and_auto_language(
     arguments = _recorded_arguments(fake_runtime)
     assert result == output_dir.resolve() / "movie.part.srt"
     assert result.read_bytes() == b""
-    assert arguments[:6] == [
+    assert arguments[:4] == [
         "--model",
         str(fake_runtime.model),
         "--vad-model",
         str(fake_runtime.vad_model),
-        "--file",
-        str(fake_runtime.audio.resolve()),
     ]
-    assert arguments[6:8] == ["--output-file", arguments[7]]
-    assert Path(arguments[7]).parent.parent == output_dir.resolve()
-    assert Path(arguments[7]).name == fake_runtime.audio.stem
-    assert arguments[8:] == [
+    assert arguments[4:-1] == [
         "--output-srt",
         "--language",
         "auto",
@@ -159,6 +156,7 @@ def test_transcribe_uses_the_fixed_profile_and_auto_language(
         "--no-prints",
         "--print-progress",
     ]
+    assert Path(arguments[-1]).parent.parent == output_dir.resolve()
 
 
 def test_transcribe_passes_an_explicit_language_and_overwrites_on_success(
@@ -187,7 +185,7 @@ def test_transcribe_reports_only_monotonic_valid_progress(
 ) -> None:
     # Given: Native progress containing noise, overflow, and a regression.
     RecordingProgress.instances.clear()
-    monkeypatch.setattr(transcribe_module, "tqdm", RecordingProgress)
+    monkeypatch.setattr(whisper_batch_module, "tqdm", RecordingProgress)
     monkeypatch.setenv(
         "FAKE_PROGRESS",
         "|".join(
@@ -229,7 +227,7 @@ def test_transcribe_progress_is_visible_in_a_zero_width_pty(
         ):
             context.setattr(sys, "stderr", terminal)
             context.setattr("shutil.get_terminal_size", Mock(return_value=zero_size))
-            context.setattr("src.transcribe.tqdm", progress_factory)
+            context.setattr("src.whisper_batch.tqdm", progress_factory)
             _ = Transcriber().transcribe(fake_runtime.audio)
         rendered = os.read(master, 4096).decode(errors="replace")
     finally:
@@ -295,7 +293,7 @@ def test_transcribe_terminates_the_child_on_python_failure_or_cancellation(
     def raise_failure(_line: str) -> int | None:
         raise failure_type("forced parser interruption")
 
-    monkeypatch.setattr(transcribe_module, "parse_progress", raise_failure)
+    monkeypatch.setattr(whisper_batch_module, "parse_progress", raise_failure)
 
     # When / Then: Propagation happens only after preserving output and reaping the child.
     with pytest.raises(failure_type):
@@ -321,3 +319,60 @@ def test_transcribe_names_a_missing_managed_prerequisite(
     # When / Then: Validation names the unavailable absolute path.
     with pytest.raises(FileNotFoundError, match=str(missing)):
         _ = Transcriber().transcribe(fake_runtime.audio, quiet=True)
+
+
+def test_transcribe_many_uses_one_process_and_publishes_each_output(
+    fake_runtime: FakeRuntime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: Two audio tasks sharing one managed native runtime.
+    second_audio = tmp_path / "second.wav"
+    second_audio.write_bytes(b"fixture")
+    first_output = tmp_path / "first.srt"
+    second_output = tmp_path / "second.srt"
+    monkeypatch.setenv("FAKE_SRT", "published")
+
+    # When: Both files are submitted together.
+    failures = Transcriber().transcribe_many(
+        (
+            TranscriptionTask(fake_runtime.audio, first_output),
+            TranscriptionTask(second_audio, second_output),
+        ),
+        language="en",
+        quiet=True,
+    )
+
+    # Then: One invocation publishes both destinations atomically.
+    arguments = _recorded_arguments(fake_runtime)
+    assert failures == []
+    assert arguments.count("--model") == 1
+    assert len(arguments[arguments.index("--print-progress") + 1 :]) == 2
+    assert first_output.read_text(encoding="utf-8") == "published"
+    assert second_output.read_text(encoding="utf-8") == "published"
+
+
+def test_transcribe_many_isolates_a_missing_native_output(
+    fake_runtime: FakeRuntime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: A native batch that omits only its second output.
+    second_audio = tmp_path / "second.wav"
+    second_audio.write_bytes(b"fixture")
+    first_output = tmp_path / "first.srt"
+    second_output = tmp_path / "second.srt"
+    monkeypatch.setenv("FAKE_SRT", "published")
+    monkeypatch.setenv("FAKE_SKIP_INDEX", "1")
+    tasks = (
+        TranscriptionTask(fake_runtime.audio, first_output),
+        TranscriptionTask(second_audio, second_output),
+    )
+
+    # When: The native process exits after the partial batch.
+    failures = Transcriber().transcribe_many(tasks, quiet=True)
+
+    # Then: The complete first result is retained and only the second fails.
+    assert [failure.task for failure in failures] == [tasks[1]]
+    assert first_output.is_file()
+    assert not second_output.exists()

@@ -12,8 +12,10 @@ from src.config import (
     WHISPER_MODEL_PATH,
     WHISPER_VAD_MODEL_PATH,
 )
+from src.transcribe import Transcriber, TranscriptionTask
 
 EXAMPLE_VIDEO: Final = Path(__file__).with_name("example.mp4")
+EXAMPLE_AUDIO: Final = Path(__file__).with_name("example_en.mp3")
 REAL_ASR_AVAILABLE: Final = (
     WHISPER_CLI_PATH.is_file()
     and os.access(WHISPER_CLI_PATH, os.X_OK)
@@ -177,3 +179,33 @@ def test_module_cli_transcribes_the_real_media_fixture_on_rocm(tmp_path: Path) -
     )
     assert validation.returncode == 0, validation.stderr
     assert validation.stdout.startswith("validated ")
+
+
+@pytest.mark.skipif(
+    not REAL_ASR_AVAILABLE or not EXAMPLE_AUDIO.is_file(),
+    reason="managed whisper.cpp runtime or the second media fixture is unavailable",
+)
+def test_transcribe_many_processes_two_real_audio_files_in_one_batch(
+    tmp_path: Path,
+) -> None:
+    # Given: The video fixture converted to WAV and the independent MP3 fixture.
+    first_audio = AudioExtractor().extract(EXAMPLE_VIDEO, tmp_path / "first.wav")
+    tasks = (
+        TranscriptionTask(first_audio, tmp_path / "first.srt"),
+        TranscriptionTask(EXAMPLE_AUDIO, tmp_path / "second.srt"),
+    )
+
+    # When: Both files enter one managed whisper.cpp invocation.
+    failures = Transcriber().transcribe_many(tasks, language="en", quiet=True)
+
+    # Then: Both outputs contain valid ordered subtitle timelines.
+    assert failures == []
+    for task in tasks:
+        validation = subprocess.run(
+            [sys.executable, "-c", SRT_VALIDATION_SCRIPT, str(task.output_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert validation.returncode == 0, validation.stderr
