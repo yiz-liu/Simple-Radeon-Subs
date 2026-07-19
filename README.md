@@ -16,8 +16,7 @@ Silero VAD. The standalone Python Silero stage has been removed.
 - Linux or WSL2
 - [uv](https://docs.astral.sh/uv/)
 - System `ffmpeg` and `ffprobe` available on `PATH`
-- ROCm-compatible AMD GPU for ASR acceleration
-- Google Gemini API key when translation is enabled
+- ROCm-compatible AMD GPU for ASR and translation acceleration
 
 Install FFmpeg on Ubuntu or WSL:
 
@@ -63,18 +62,10 @@ Verify the base environment and system tools:
 
 ```bash
 uv run --managed-python python --version
-uv run --managed-python python -c "import dotenv, tqdm; print('base environment OK')"
+uv run --managed-python python -c "import tqdm; print('base environment OK')"
 ffmpeg -version
 ffprobe -version
 ```
-
-Create the local configuration file when translation is needed:
-
-```bash
-cp .env.template .env
-```
-
-Add `GEMINI_API_KEY` to `.env`. The file is ignored by Git.
 
 Prepare the full ROCm environment and the managed ASR runtime:
 
@@ -106,7 +97,7 @@ The output is 16 kHz, mono, 16-bit PCM WAV for downstream ASR processing.
 
 ## Full Pipeline
 
-The full pipeline uses the managed whisper.cpp backend:
+The full pipeline uses the managed whisper.cpp and local vLLM backends:
 
 ```bash
 python run.py /path/to/video.mp4
@@ -121,6 +112,10 @@ Useful options:
 - `--keep-temp`: preserve intermediate WAV and SRT files
 - `--force`: overwrite output and rebuild intermediates
 - `--translated-only`: omit source text from the final subtitles
+
+Translation is fully local and uses the managed model at
+`models/Qwen3.5-9B-AWQ-4bit`. The application does not send subtitle content to
+an online service.
 
 ## Standalone Transcription
 

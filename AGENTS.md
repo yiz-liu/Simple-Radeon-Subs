@@ -1,7 +1,7 @@
 # AGENTS.md - Development Guidelines for Simple Radeon Subs
 
 ## Project Overview
-Movie subtitle translation tool using ASR transcription and Google Gemini translation. Targeted at AMD GPUs on WSL with ROCm.
+Movie subtitle generation and local translation tool targeted at AMD GPUs on WSL with ROCm.
 
 ## Development Commands
 
@@ -91,11 +91,11 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - Classes: PascalCase (`AudioExtractor`, `Transcriber`)
 - Functions/Methods: snake_case (`clean_srt`, `process_video`)
 - Variables: snake_case (`audio_path`, `target_lang`)
-- Constants: UPPER_SNAKE_CASE (`GEMINI_API_KEY`, `AUDIO_SAMPLE_RATE`)
+- Constants: UPPER_SNAKE_CASE (`TRANSLATION_MODEL_PATH`, `AUDIO_SAMPLE_RATE`)
 - Private methods: underscore prefix (`_load_model`, `_resolve_ffmpeg`)
 
 ### Error Handling
-- Use try/except for I/O operations and external API calls
+- Use try/except for I/O operations and native runtime boundaries
 - Log errors with `logger.error()` including exception details: `exc_info=True`
 - Raise descriptive exceptions with context: `FileNotFoundError(f"Input not found: {path}")`
 - Handle subprocess failures with returncode checks
@@ -105,12 +105,6 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - Use appropriate levels: `logger.info()`, `logger.warning()`, `logger.error()`
 - Include relevant context in log messages
 - Use `logger.info()` for progress updates, `logger.warning()` for non-critical issues
-
-### Concurrency
-- Use `concurrent.futures.ThreadPoolExecutor` for parallel API calls
-- Use `tqdm` for progress bars in concurrent operations
-- Implement retry logic with exponential backoff for API calls
-- Use `as_completed()` to process results as they finish
 
 ### Classes and Methods
 - Include docstrings for all classes and public methods
@@ -124,9 +118,7 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - Support both file and directory inputs where appropriate
 
 ### Configuration
-- Store configuration in `src/config.py`
-- Use `python-dotenv` for environment variables
-- Load `.env` from project root
+- Store fixed managed paths and runtime constants in `src/config.py`
 - Define constants at module level
 
 ### Subtitle Processing
@@ -141,12 +133,6 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - Parse FFmpeg progress output for progress bars
 - Require system FFmpeg and ffprobe binaries on `PATH`
 
-### API Integration
-- Implement retry logic for HTTP requests
-- Use timeouts for all API calls
-- Handle rate limiting (HTTP 429) with backoff
-- Validate API responses before processing
-
 ### Testing Notes
 - Pytest is configured for tests under `tests/`
 - Manual testing required for each module
@@ -160,29 +146,25 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 - `src/audio.py`: Audio extraction with FFmpeg
 - `src/transcribe.py`: Fixed whisper.cpp adapter using `.venv/bin/whisper-cli` and managed weights under `models/whisper`
 - `src/clean.py`: Conservative SRT normalization and duplicate filtering
-- `src/translate.py`: Gemini API translation with concurrency
-- `src/config.py`: Configuration and environment variables
+- `src/translate.py`: CLI for the fixed local vLLM translation backend
+- `src/translation.py`: Subtitle batching and local vLLM inference
+- `src/config.py`: Managed paths and runtime constants
 - `src/logger.py`: Logging setup
 
 ### Data Flow
 1. Video file → Audio extraction (WAV)
 2. WAV → Whisper transcription (SRT)
 3. SRT → Conservative cleanup (trim, safe filtering, time-aware deduplication)
-4. Cleaned SRT → Gemini translation (concurrent batches)
+4. Cleaned SRT → local vLLM translation (batched inference)
 5. Final SRT output
 
 ### Performance Considerations
 - ASR runs through the fixed HIP whisper.cpp profile with built-in VAD and native progress reporting
-- Translation uses concurrent API calls (default: 10 workers)
-- Batch size for translation: 30 lines per request
+- Translation submits all subtitle batches to the local vLLM scheduler
+- Batch size for translation: 16 lines per prompt
 - FFmpeg extraction shows real-time progress
-
-## Environment Variables
-Required in `.env`:
-- `GEMINI_API_KEY`: Google Gemini API for translation
-- `GEMINI_API_URL`: Optional custom API endpoint
 
 ## Hardware Requirements
 - AMD GPU with a compatible ROCm release
 - Python 3.12+
-- Sufficient GPU memory for the managed Whisper large-v3-turbo model
+- Sufficient GPU memory for the managed Whisper and translation models

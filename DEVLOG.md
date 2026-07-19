@@ -63,9 +63,9 @@ With the core inference engine working, I designed the rest of the pipeline:
     -   **Solution**: A custom regex-based cleaner (`src/clean.py`) to strip these out before translation.
 
 4.  **Translation**:
-    -   **Engine**: **Google Gemini API**.
-    -   **Strategy**: Concurrency. Translating line-by-line is too slow. I built a threaded translator (`src/translate.py`) that sends batches of subtitles in parallel.
-    -   **Prompt Engineering**: "Strict Alignment" and "No Bullshit" rules to keep Gemini focused.
+    -   **Engine**: A managed local Qwen model through vLLM.
+    -   **Strategy**: Submit subtitle batches together so the local vLLM scheduler can maximize GPU throughput.
+    -   **Privacy**: Subtitle content remains on the workstation throughout the pipeline.
 
 ## Conclusion
 
