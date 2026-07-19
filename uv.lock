@@ -2312,8 +2312,6 @@ source = { virtual = "." }
 dependencies = [
     { name = "modelscope" },
     { name = "pysrt" },
-    { name = "python-dotenv" },
-    { name = "requests" },
     { name = "tqdm" },
 ]
 
@@ -2330,8 +2328,6 @@ vllm = [
 requires-dist = [
     { name = "modelscope", specifier = ">=1.38.1" },
     { name = "pysrt", specifier = ">=1.1.2" },
-    { name = "python-dotenv", specifier = ">=1.2.1" },
-    { name = "requests", specifier = ">=2.32.5" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
 

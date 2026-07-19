@@ -8,7 +8,7 @@ from src.audio import AudioExtractor
 from src.clean import clean_srt
 from src.logger import logger
 from src.transcribe import Transcriber
-from src.translate import create_translator
+from src.translation import TranslationOptions, VLLMTranslator
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -47,7 +47,6 @@ def process_video(
     keep_temp: bool,
     force: bool,
     translated_only: bool,
-    provider: str | None = None,
 ) -> None:
     """
     Processes a single video file: Extract -> Transcribe -> Clean -> Translate.
@@ -108,12 +107,14 @@ def process_video(
 
         logger.info("[%s] Step 4: Translate to %s", base_name, target_lang)
 
-        translator = create_translator(provider)
+        translator = VLLMTranslator()
         translator.translate_srt(
             input_path=cleaned_srt_path,
             output_path=final_srt_path,
-            target_lang=target_lang,
-            translated_only=translated_only,
+            options=TranslationOptions(
+                target_lang=target_lang,
+                translated_only=translated_only,
+            ),
         )
 
         elapsed = time.time() - start_time
@@ -147,7 +148,6 @@ class _Arguments(argparse.Namespace):
     keep_temp: bool = False
     force: bool = False
     translated_only: bool = False
-    provider: str | None = None
 
 
 def main() -> None:
@@ -188,13 +188,6 @@ def main() -> None:
         action="store_true",
         help="Generate translated subtitles only instead of bilingual subtitles.",
     )
-    _ = parser.add_argument(
-        "--provider",
-        choices=["gemini", "openai", "vllm"],
-        default=None,
-        help="Translation provider (overrides TRANSLATION_PROVIDER env var).",
-    )
-
     args = parser.parse_args(namespace=_Arguments())
 
     input_path = Path(args.input).resolve()
@@ -231,7 +224,6 @@ def main() -> None:
             keep_temp=args.keep_temp,
             force=args.force,
             translated_only=args.translated_only,
-            provider=args.provider,
         )
 
     logger.info("All tasks completed.")
