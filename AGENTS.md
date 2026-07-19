@@ -142,12 +142,15 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 ## Architecture Notes
 
 ### Module Responsibilities
-- `run.py`: Orchestration and CLI entry point
+- `run.py`: CLI input discovery and pipeline entry point
+- `src/pipeline.py`: Stage-wise batch scheduling, sidecar reuse, and failure isolation
 - `src/audio.py`: Audio extraction with FFmpeg
 - `src/transcribe.py`: Fixed whisper.cpp adapter using `.venv/bin/whisper-cli` and managed weights under `models/whisper`
+- `src/whisper_batch.py`: One-process multi-file whisper.cpp execution and progress parsing
 - `src/clean.py`: Conservative SRT normalization and duplicate filtering
 - `src/translate.py`: CLI for the fixed local vLLM translation backend
 - `src/translation.py`: Subtitle batching and local vLLM inference
+- `src/translation_output.py`: Final subtitle construction and atomic publication
 - `src/translation_requests.py`: Overlapping request windows and structured output parsing
 - `src/config.py`: Managed paths and runtime constants
 - `src/logger.py`: Logging setup
@@ -160,10 +163,12 @@ dependencies. Omit the source language to use whisper.cpp auto-detection.
 5. Final SRT output
 
 ### Performance Considerations
-- ASR runs through the fixed HIP whisper.cpp profile with built-in VAD and native progress reporting
-- Translation submits all subtitle batches to the local vLLM scheduler
+- Directory inputs run stage by stage across all pending media files
+- ASR submits all pending audio files to one fixed HIP whisper.cpp process with built-in VAD and native progress reporting
+- Translation submits all prepared subtitle requests to one local vLLM engine
 - Translation requests use 16 core lines plus up to 4 overlapping lines per side
 - FFmpeg extraction shows real-time progress
+- Existing final subtitles skip before native adapters initialize; failed jobs resume from per-input sidecars
 
 ## Hardware Requirements
 - AMD GPU with a compatible ROCm release

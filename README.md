@@ -104,14 +104,35 @@ python run.py /path/to/video.mp4
 python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
 python run.py /path/to/video.mp4 --keep-temp
 python run.py /path/to/video.mp4 --translated-only
+python run.py /path/to/media-directory/
 ```
 
 Useful options:
 
 - `--src-lang`: source language code; whisper.cpp auto-detects it when omitted
-- `--keep-temp`: preserve intermediate WAV and SRT files
-- `--force`: overwrite output and rebuild intermediates
+- `--keep-temp`: preserve successful per-input sidecars containing intermediate WAV and SRT files
+- `--force`: ignore the final subtitle and rebuild that input from a clean sidecar
 - `--translated-only`: omit source text from the final subtitles
+
+Directory runs are organized by stage: FFmpeg extracts every pending input,
+whisper.cpp transcribes all pending audio files with one model load, cleanup runs
+for every transcription, and vLLM translates all prepared requests with one
+model load. Audio files and video files can be mixed in the same input tree.
+When `--output-dir` is used, the source directory layout is preserved below it.
+
+Each source uses a private sidecar beside the media file:
+
+```text
+.<source-filename>.simple-radeon-subs/
+```
+
+Existing, up-to-date intermediate stages are reused after a failure. Successful
+jobs remove their sidecars unless `--keep-temp` is set; failed jobs retain them.
+An existing final SRT always skips the input before FFmpeg or either model is
+initialized, so a successful input remains skippable after its sidecar has been
+removed. Use `--force` when fixed model settings or weights have changed and the
+result must be rebuilt. The process exits nonzero if any input fails while still
+allowing other inputs in the same batch to finish.
 
 Translation is fully local and uses the managed model at
 `models/Qwen3.5-9B-AWQ-4bit`. The application does not send subtitle content to
@@ -144,7 +165,8 @@ python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
 ```
 
 The command displays native transcription progress by default. `--quiet` hides
-the Python progress bar without changing transcription behavior.
+the Python progress bar without changing transcription behavior. Full-pipeline
+directory runs submit every pending audio file to one whisper.cpp process.
 
 ## Subtitle Cleanup
 
