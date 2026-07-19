@@ -1,6 +1,9 @@
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import MagicMock
 
 import pysrt
 import pytest
@@ -13,6 +16,7 @@ from src.translation import (
     VLLMTranslator,
 )
 from src.translation_requests import TranslationRequest
+from src.translation_requests import TranslationOutputError, build_translation_requests
 
 
 class FakeBatchTranslator(VLLMTranslator):
@@ -161,3 +165,67 @@ def test_translate_many_isolates_one_output_save_failure(
     assert tasks[1].output_path.is_file()
     assert translator.inference_calls == 1
     assert translator.release_calls == 1
+
+
+def test_run_inference_caps_each_translation_at_2048_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: One translation request and a recorded native vLLM boundary.
+    translator = VLLMTranslator(tmp_path)
+    request = build_translation_requests(("source",))[0]
+    fake_llm = MagicMock()
+    fake_llm.chat.return_value = []
+    fake_vllm = ModuleType("vllm")
+    fake_sampling_params = ModuleType("vllm.sampling_params")
+
+    class FakeStructuredOutputsParams:
+        def __init__(self, *, json: str) -> None:
+            self.json = json
+
+    class FakeSamplingParams:
+        def __init__(
+            self,
+            *,
+            temperature: float,
+            top_p: float,
+            top_k: int,
+            presence_penalty: float,
+            max_tokens: int,
+            skip_special_tokens: bool,
+            structured_outputs: FakeStructuredOutputsParams,
+        ) -> None:
+            self.max_tokens = max_tokens
+
+    setattr(fake_vllm, "SamplingParams", FakeSamplingParams)
+    setattr(
+        fake_sampling_params,
+        "StructuredOutputsParams",
+        FakeStructuredOutputsParams,
+    )
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", fake_sampling_params)
+    monkeypatch.setattr(translator, "_load_engine", lambda: fake_llm)
+
+    # When: The request is prepared for vLLM inference.
+    outputs = translator._run_inference((request,), "Chinese")
+
+    # Then: Its generation budget is capped without changing request batching.
+    sampling_params = fake_llm.chat.call_args.kwargs["sampling_params"]
+    assert outputs == []
+    assert [params.max_tokens for params in sampling_params] == [2048]
+
+
+def test_length_failure_identifies_the_request_cues_and_generated_size() -> None:
+    # Given: A later request whose model output exhausted its generation budget.
+    request = build_translation_requests(tuple(f"cue {index}" for index in range(24)))[
+        1
+    ]
+    output = InferenceResult("partial", "length")
+
+    # When / Then: The error identifies both owned and contextual cues.
+    with pytest.raises(
+        TranslationOutputError,
+        match=(r"core cues 17-24 \(window 13-24\).*'length'.*7 characters"),
+    ):
+        _ = VLLMTranslator._parse_output(request, output)

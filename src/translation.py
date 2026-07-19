@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm import LLM
 
 MODEL_CONTEXT_LENGTH: Final = 4096
+MAX_TRANSLATION_TOKENS: Final = 2048
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +186,7 @@ class VLLMTranslator:
                 top_p=0.8,
                 top_k=20,
                 presence_penalty=1.5,
-                max_tokens=None,
+                max_tokens=MAX_TRANSLATION_TOKENS,
                 skip_special_tokens=True,
                 structured_outputs=StructuredOutputsParams(
                     json=json.dumps(request.schema, separators=(",", ":"))
@@ -248,8 +249,12 @@ class VLLMTranslator:
         if output.text is None:
             raise TranslationOutputError("Translation request returned no output")
         if output.finish_reason != "stop":
+            core_range = f"{request.core_ids[0]}-{request.core_ids[-1]}"
+            window_range = f"{request.window_ids[0]}-{request.window_ids[-1]}"
             raise TranslationOutputError(
-                f"Translation request stopped with {output.finish_reason!r}"
+                "Translation request for core cues "
+                + f"{core_range} (window {window_range}) stopped with "
+                + f"{output.finish_reason!r} after {len(output.text)} characters"
             )
         return parse_translation_output(output.text.strip(), request)
 
