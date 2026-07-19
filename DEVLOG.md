@@ -1,78 +1,210 @@
-# The Journey: Building Simple Radeon Subs on WSL
+# Development Log: ROCm Environment
 
-> **TL;DR:** This document chronicles the development journey of **Simple Radeon Subs**, specifically focusing on the challenges of running AI inference on AMD Radeon GPUs within a WSL (Windows Subsystem for Linux) environment. It documents the failures, the "aha!" moments, and the final working configuration.
+This log preserves the environment experiments that led to the current WSL and
+AMD GPU setup.
 
----
+## Initial Experiments
 
-## Part 1: The Ambition
+The initial target was local movie subtitle generation and translation on:
 
-The goal was simple: Create a high-performance, local movie subtitle translator.
-The hardware: **AMD Radeon RX 9070 XT**.
-The environment: **WSL2 (Ubuntu)**.
+- WSL2 with Ubuntu;
+- AMD Radeon RX 9070 XT (`gfx1201`);
+- ROCm 7.2.0.
 
-While Nvidia users enjoy a smooth sailing with CUDA, the AMD ROCm ecosystem on consumer cards (especially on Windows/WSL) is a bit of a wild west.
+### CTranslate2 ROCm fork
 
-## Part 2: The "Faster-Whisper" Trap (Failure)
+The first ASR route used a ROCm fork of
+[CTranslate2](https://github.com/OpenNMT/CTranslate2), the runtime behind
+`faster-whisper`.
 
-My first instinct was to use [CTranslate2](https://github.com/OpenNMT/CTranslate2) (the engine behind `faster-whisper`) because, well, it's *faster*. I found a fork `CTranslate2-rocm` and attempted to build it from source.
+The experiment used:
 
-### The Setup
-- **System**: Linux (ROCm 7.2.0, gfx1201)
-- **Repo**: `https://github.com/arlo-phoenix/CTranslate2-rocm.git`
-- **Compiler**: AMD clang++ (ROCm 7.2.0)
+- repository: `https://github.com/arlo-phoenix/CTranslate2-rocm.git`;
+- compiler: AMD clang++ from ROCm 7.2.0;
+- target: `gfx1201`.
 
-### The Struggle
-1.  **CMake Hell**: The build system required specific CMake versions and policy tweaks just to start configuration.
-2.  **Missing Libraries**: `libiomp5` (Intel OpenMP) issues popped up, requiring manual flags to force `libomp`.
-3.  **The Wall**: After hours of configuring, the build failed during compilation with errors like:
-    ```
-    error: no template named 'counting_iterator' in namespace 'thrust'
-    error: use of undeclared identifier 'hipblasGemmEx_v2'
-    ```
+Configuration required CMake policy adjustments and replacing an unavailable
+Intel OpenMP dependency (`libiomp5`) with `libomp`. Compilation then failed in
+the CUDA-to-HIP compatibility layer, including:
 
-### The Lesson
-**ROCm 7.2.0 broke backward compatibility.**
-The `hipBLAS` and `Thrust` libraries in the newer ROCm versions have refactored APIs that older CTranslate2 forks rely on. Fixing this would require rewriting the CUDA-to-HIP compatibility layer—a massive undertaking.
+```text
+error: no template named 'counting_iterator' in namespace 'thrust'
+error: use of undeclared identifier 'hipblasGemmEx_v2'
+```
 
-**Status:** ❌ Abandoned.
+The available fork depended on Thrust and hipBLAS APIs that did not match the
+installed ROCm headers. Adapting and maintaining that native fork was outside
+the project scope, so this route was abandoned. This result applies to the
+tested fork and toolchain; it is not a general claim that CTranslate2 cannot run
+on ROCm.
 
-## Part 3: The Pivot to Native PyTorch (Success)
+### Native PyTorch and openai-whisper
 
-If "faster" wasn't an option, maybe "standard" was. I decided to try the official `openai-whisper` package, but backed by a custom-built PyTorch for ROCm.
+The next experiment installed ROCm-specific PyTorch wheels and ran the official
+`openai-whisper` package with `large-v3-turbo`. It successfully used the RX 9070
+XT and established that the WSL driver path, PyTorch ROCm runtime, and Whisper
+weights were functional.
 
-### The Breakthrough
-Instead of `pip install torch`, which pulls the standard CUDA/CPU version, I found the specific wheels for ROCm 7.2.0.
+This became the first working ASR baseline. It was later superseded as the
+runtime boundary because long-form decoding remained inside Python and did not
+provide the desired native execution profile.
 
-It worked! The official Whisper implementation (`large-v3-turbo`) ran smoothly on the RX 9070 XT, utilizing the GPU acceleration via the ROCm-PyTorch backend.
+### Early toolchain design
 
-## Part 4: The Toolchain Design
+The first working design proposed:
 
-With the core inference engine working, I designed the rest of the pipeline:
+- a downloaded static FFmpeg under `tools/ffmpeg/`, intended to avoid `sudo`
+  and differences between system packages;
+- `openai-whisper` with `large-v3-turbo`, producing SRT directly;
+- regex-based cleanup for hallucinated credits such as “Subtitle by Amara.org”
+  and SDH text such as `[Music]`;
+- local Qwen translation through vLLM, with requests submitted in batches to
+  improve GPU use and keep subtitle content on the workstation.
 
-1.  **Audio Extraction**:
-    -   **Problem**: System FFmpeg can be messy or missing.
-    -   **Solution**: Download a **static FFmpeg binary** into `tools/ffmpeg/`. It's portable, version-controlled, and doesn't require `sudo`.
+These decisions captured a functional prototype, not a reproducible environment
+contract. In particular, a bundled FFmpeg introduced another platform-specific
+binary and update mechanism, while Python dependencies, native builds, and model
+weights still lacked clear ownership.
 
-2.  **Transcription**:
-    -   **Engine**: `openai-whisper`.
-    -   **Model**: `large-v3-turbo` (Good balance of speed/accuracy).
-    -   **Format**: Output strictly to SRT.
+## Current Environment Baseline (2026-07-19)
 
-3.  **Cleaning**:
-    -   **Problem**: Whisper hallucinations ("Subtitle by Amara.org") and SDH tags (`[Music]`).
-    -   **Solution**: A custom regex-based cleaner (`src/clean.py`) to strip these out before translation.
+The environment work was revisited with the following completion criteria:
 
-4.  **Translation**:
-    -   **Engine**: A managed local Qwen model through vLLM.
-    -   **Strategy**: Submit subtitle batches together so the local vLLM scheduler can maximize GPU throughput.
-    -   **Privacy**: Subtitle content remains on the workstation throughout the pipeline.
+- a locked Python 3.12 environment;
+- working PyTorch and vLLM ROCm extensions;
+- a reproducible HIP build of whisper.cpp;
+- verified model files at fixed project paths;
+- repeatable checks for the assembled runtime and downloaded assets.
 
-## Conclusion
+The verified machine now uses system ROCm 7.2.4. System ROCm did not need to be
+downgraded to match the patch version encoded by the Python wheels.
 
-Building **Simple Radeon Subs** taught me that while the AMD ROCm ecosystem is improving, it still requires navigating a maze of version incompatibilities.
+### Dependency ownership
 
-- **Don't** try to compile legacy CUDA projects on bleeding-edge ROCm unless you love C++ error logs.
-- **Do** use official PyTorch wheels for ROCm; they are surprisingly robust.
-- **WSL** is a viable platform for AI on AMD, provided you get the drivers right.
+The final design separates three dependency layers:
 
-Enjoy the tool!
+| Layer | Owner | Contents |
+| --- | --- | --- |
+| System | OS and ROCm installation | FFmpeg, CMake, Git, `hipcc`, `rocminfo` |
+| Python | uv and `uv.lock` | Python 3.12, ModelScope, test tools, vLLM and its ROCm stack |
+| Native assets | Project scripts | whisper.cpp CLI, build manifest, model weights |
+
+uv manages Python packages only. Project scripts build or download external
+runtime assets, and the operating system provides drivers and general-purpose
+native tools.
+
+### Python package resolution
+
+Building vLLM from source was considered when no ROCm 7.2.4 wheel was apparent.
+The vLLM wheel index instead provided a coordinated `rocm723` stack for vLLM
+0.25.1, including PyTorch, Triton, AITER, and compiled ROCm extensions. Reusing
+that stack was more reproducible than rebuilding the same dependency graph.
+
+`pyproject.toml` uses the Tsinghua mirror as the default index and binds vLLM to:
+
+```text
+https://wheels.vllm.ai/rocm/0.25.1/rocm723
+```
+
+uv uses `first-index`, and the committed lock records both sources. A locked
+sync therefore requires no local index override and cannot silently resolve
+vLLM from a general-purpose index.
+
+The verified packages are:
+
+```text
+vLLM: 0.25.1+rocm723
+PyTorch: 2.11.0+gitd0c8b1f
+Triton: 3.6.0
+Torch HIP runtime: 7.2.53211
+```
+
+The system ROCm 7.2.4 compiler remains responsible for native HIP builds. Its
+patch version and the Python wheel stack do not need to be identical when the
+runtime compatibility checks pass.
+
+### vLLM on WSL
+
+The prebuilt wheel loads and computes on the RX 9070 XT, but WSL blocks the AMD
+SMI path used by parts of vLLM platform discovery. Two failures were observed:
+
+1. ROCm detection could stop before falling back to `torch.version.hip`.
+2. Early `warning_once` calls could import distributed state while platform
+   initialization was incomplete, causing a circular import.
+
+`scripts/patch_vllm.sh` applies the local workaround. It accepts only
+`0.25.1+rocm723`, validates original or already-patched file hashes, modifies the
+known files, compiles them, and runs a GPU import smoke test. Unexpected wheel
+contents fail rather than receiving a best-effort patch.
+
+The workaround is tied to upstream vLLM work in
+[#38434](https://github.com/vllm-project/vllm/pull/38434) and should be removed
+after a compatible wheel passes the repository checks without it.
+
+### Managed whisper.cpp build
+
+whisper.cpp is neither a Python dependency nor a retained submodule.
+`scripts/install_whisper_cli.sh` performs a transient, pinned build:
+
+1. fetch the pinned commit into a temporary directory;
+2. detect AMD targets through `rocminfo`;
+3. build only `whisper-cli` with HIP in Release mode;
+4. reject unexpected shared whisper.cpp dependencies;
+5. install the executable at `.venv/bin/whisper-cli`;
+6. record commit, target, toolchain, and binary hashes in
+   `.venv/.whisper-cli-build.json`;
+7. remove the temporary source and build trees.
+
+This provides a reproducible native ASR tool without keeping a second source
+tree in the repository or treating CMake output as a uv package.
+
+### System FFmpeg
+
+The project-local static FFmpeg proposal was retired. `ffmpeg` and `ffprobe` are
+system prerequisites and must be present on `PATH`.
+
+This avoids storing a large third-party binary and avoids adding a separate
+platform-specific download mechanism. The application verifies both tools and
+uses FFmpeg's machine-readable progress output.
+
+### Model storage
+
+Large weights are managed outside uv under fixed project paths:
+
+```text
+models/whisper/ggml-large-v3-turbo.bin
+models/whisper/ggml-silero-v6.2.0.bin
+models/Qwen3.5-9B-AWQ-4bit/
+```
+
+ModelScope is a base Python dependency and provides the primary download path
+for the Whisper and translation models. The Silero VAD file comes from the
+official whisper.cpp Hugging Face repository. `scripts/download_weights.sh`
+pins the translation revision, checks required files and SHA-256 hashes, and
+refuses to overwrite unexpected existing content. Checksums also fix the exact
+Whisper and VAD artifacts when their source URLs use moving branch names.
+
+Weights are prepared after the software environment. They are runtime assets,
+not Python packages, and do not belong in `uv.lock`.
+
+### Reproduction and verification
+
+The environment can be reproduced with:
+
+```bash
+uv python install 3.12
+uv sync --locked --managed-python --group dev --group vllm
+source .venv/bin/activate
+./scripts/patch_vllm.sh
+./scripts/install_whisper_cli.sh
+./scripts/download_weights.sh
+./scripts/doctor.sh
+```
+
+The doctor checks system tools, Python 3.12, ModelScope, PyTorch, Triton, vLLM,
+ROCm platform selection, BF16 GPU computation, native vLLM extensions,
+whisper-cli linkage, and the two ASR weights. The download script separately
+verifies the translation model.
+
+At this point each environment component had one owner and a reproducible
+verification path. This completed the environment-preparation phase.

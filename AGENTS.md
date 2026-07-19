@@ -1,176 +1,144 @@
-# AGENTS.md - Development Guidelines for Simple Radeon Subs
+# Development Guidelines
 
-## Project Overview
-Movie subtitle generation and local translation tool targeted at AMD GPUs on WSL with ROCm.
+## Scope
 
-## Development Commands
+Simple Radeon Subs generates and translates movie subtitles locally on AMD
+Radeon GPUs under WSL. Keep changes focused on the fixed, tested runtime instead
+of adding speculative backends or configuration surfaces.
 
-This project uses [uv](https://docs.astral.sh/uv/) for virtual environment and dependency management. Before executing any commands, please:
+## Environment
+
+Create or update `.venv` from the committed lock:
 
 ```bash
-source .venv/bin/activate
-```
+# Base runtime
+uv sync --locked --managed-python
 
-### Running the Application
-```bash
-# Full pipeline (extract -> transcribe -> clean -> translate)
-python run.py /path/to/video.mp4
+# Development tools
+uv sync --locked --managed-python --group dev
 
-# With custom output directory and explicit source and target languages
-python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
-
-# Keep temporary files for debugging
-python run.py /path/to/video.mp4 --keep-temp
-
-# Process entire directory of videos
-python run.py /path/to/videos/
-```
-
-### Running Individual Modules
-```bash
-# Extract audio only
-python -m src.audio /path/to/video.mp4 -o output.wav
-
-# Transcribe audio only
-python -m src.transcribe /path/to/audio.wav -o ./subs
-
-# Transcribe audio with an explicit language code
-python -m src.transcribe /path/to/audio.wav -o ./subs -l de
-
-# Clean subtitles only
-python -m src.clean /path/to/subs.srt -o cleaned.srt
-
-# Translate subtitles only
-python -m src.translate /path/to/subs.srt -o translated.srt --lang Chinese
-```
-
-### Environment Setup
-```bash
-# Install the project Python version
-uv python install 3.12
-
-# Generate the lock file after dependency changes
-uv lock --managed-python
-
-# Create the development environment from the committed lock file
+# Complete GPU runtime
 uv sync --locked --managed-python --group dev --group vllm
+```
 
-# Activate virtual environment
+After `.venv` exists, activate it before running repository commands:
+
+```bash
 source .venv/bin/activate
+```
 
-# Prepare and verify the managed native ASR runtime
+After dependency declarations change, regenerate and commit the lock:
+
+```bash
+uv lock --managed-python
+```
+
+Dependency ownership is explicit:
+
+- the operating system provides ROCm, FFmpeg, CMake, and Git;
+- uv manages Python 3.12 and declared Python packages;
+- project scripts patch vLLM, build whisper.cpp, and download weights.
+
+Prepare the complete native runtime with:
+
+```bash
 ./scripts/patch_vllm.sh
 ./scripts/install_whisper_cli.sh
 ./scripts/download_weights.sh
 ./scripts/doctor.sh
 ```
 
-The ASR executable and weights are installed separately from uv-managed Python
-dependencies. Omit the source language to use whisper.cpp auto-detection.
+Do not install undeclared Python packages directly into `.venv`.
 
-## Code Style Guidelines
+## Commands
 
-### Type Hints
-- Use Python 3.12+ union syntax: `str | Path` instead of `Union[str, Path]`
-- Always include return types for public methods
-- Use `Optional[T]` for nullable parameters
-- Import typing from standard library: `from typing import Optional, List, Dict`
+Run the full pipeline:
 
-### File Paths
-- Always use `pathlib.Path` instead of string paths
-- Resolve paths immediately: `Path(input_path).resolve()`
-- Use `Path.parent`, `Path.stem`, `Path.suffix` for path manipulation
-- Create directories with `mkdir(parents=True, exist_ok=True)`
+```bash
+python run.py /path/to/video.mp4
+python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
+python run.py /path/to/video.mp4 --keep-temp
+python run.py /path/to/videos/
+```
 
-### Import Organization
-1. Standard library imports
-2. Third-party imports
-3. Local imports (use absolute imports: `from src.X import Y`)
+Run individual stages:
 
-### Naming Conventions
-- Classes: PascalCase (`AudioExtractor`, `Transcriber`)
-- Functions/Methods: snake_case (`clean_srt`, `process_video`)
-- Variables: snake_case (`audio_path`, `target_lang`)
-- Constants: UPPER_SNAKE_CASE (`TRANSLATION_MODEL_PATH`, `AUDIO_SAMPLE_RATE`)
-- Private methods: underscore prefix (`_load_model`, `_resolve_ffmpeg`)
+```bash
+python -m src.audio /path/to/video.mp4 -o output.wav
+python -m src.transcribe /path/to/audio.wav -o ./subs
+python -m src.transcribe /path/to/audio.wav -o ./subs -l de
+python -m src.clean /path/to/subs.srt -o cleaned.srt
+python -m src.translate /path/to/subs.srt -o translated.srt --lang Chinese
+```
 
-### Error Handling
-- Use try/except for I/O operations and native runtime boundaries
-- Log errors with `logger.error()` including exception details: `exc_info=True`
-- Raise descriptive exceptions with context: `FileNotFoundError(f"Input not found: {path}")`
-- Handle subprocess failures with returncode checks
+Run development checks:
 
-### Logging
-- Import from `src.logger`: `from src.logger import logger`
-- Use appropriate levels: `logger.info()`, `logger.warning()`, `logger.error()`
-- Include relevant context in log messages
-- Use `logger.info()` for progress updates, `logger.warning()` for non-critical issues
+```bash
+pytest
+ruff check .
+basedpyright --level error run.py src tests
+```
 
-### Classes and Methods
-- Include docstrings for all classes and public methods
-- Keep methods focused and single-purpose
-- Use type hints for all parameters and return values
+`basedpyright` is an optional external developer tool. It is not a project
+runtime dependency.
 
-### CLI Arguments
-- Use `argparse` for command-line interfaces
-- Provide help text for all arguments
-- Use sensible defaults for optional parameters
-- Support both file and directory inputs where appropriate
+## Architecture
 
-### Configuration
-- Store fixed managed paths and runtime constants in `src/config.py`
-- Define constants at module level
-
-### Subtitle Processing
-- Use `pysrt` library for SRT file handling
-- Preserve timestamps during text transformations
-- Re-index subtitles after filtering/merging
-- Save with UTF-8 encoding
-
-### Audio Processing
-- Target format: 16kHz, Mono, 16-bit PCM WAV
-- Use FFmpeg for audio extraction
-- Parse FFmpeg progress output for progress bars
-- Require system FFmpeg and ffprobe binaries on `PATH`
-
-### Testing Notes
-- Pytest is configured for tests under `tests/`
-- Manual testing required for each module
-- Test with various video formats and languages
-- Verify GPU acceleration is working
-
-## Architecture Notes
-
-### Module Responsibilities
 - `run.py`: CLI input discovery and pipeline entry point
-- `src/pipeline.py`: Stage-wise batch scheduling, sidecar reuse, and failure isolation
-- `src/audio.py`: Audio extraction with FFmpeg
-- `src/transcribe.py`: Fixed whisper.cpp adapter using `.venv/bin/whisper-cli` and managed weights under `models/whisper`
-- `src/whisper_batch.py`: One-process multi-file whisper.cpp execution and progress parsing
-- `src/clean.py`: Conservative SRT normalization and duplicate filtering
-- `src/translate.py`: CLI for the fixed local vLLM translation backend
-- `src/translation.py`: Subtitle batching and local vLLM inference
-- `src/translation_output.py`: Final subtitle construction and atomic publication
-- `src/translation_requests.py`: Overlapping request windows and structured output parsing
-- `src/config.py`: Managed paths and runtime constants
-- `src/logger.py`: Logging setup
+- `src/pipeline.py`: stage-wise batch scheduling, sidecar reuse, and failure isolation
+- `src/audio.py`: FFmpeg audio extraction and progress parsing
+- `src/transcribe.py`: standalone fixed whisper.cpp adapter
+- `src/whisper_batch.py`: one-process multi-file whisper.cpp execution
+- `src/clean.py`: conservative SRT normalization and duplicate filtering
+- `src/translate.py`: standalone translation CLI
+- `src/translation.py`: subtitle preparation and local vLLM inference
+- `src/translation_requests.py`: request windows and structured output parsing
+- `src/translation_output.py`: final subtitle construction and atomic publication
+- `src/config.py`: managed paths and fixed runtime constants
+- `src/logger.py`: shared logging configuration
 
-### Data Flow
-1. Video file → Audio extraction (WAV)
-2. WAV → Whisper transcription (SRT)
-3. SRT → Conservative cleanup (trim, safe filtering, time-aware deduplication)
-4. Cleaned SRT → local vLLM translation (batched inference)
-5. Final SRT output
+Directory inputs run stage by stage across all pending files. A final SRT skips
+the input before native runtimes initialize. Intermediate state is stored in a
+per-input sidecar and reused after failure; successful sidecars are removed
+unless `--keep-temp` is active.
 
-### Performance Considerations
-- Directory inputs run stage by stage across all pending media files
-- ASR submits all pending audio files to one fixed HIP whisper.cpp process with built-in VAD and native progress reporting
-- Translation submits all prepared subtitle requests to one local vLLM engine
-- Translation requests use 16 core lines plus up to 4 overlapping lines per side
-- FFmpeg extraction shows real-time progress
-- Existing final subtitles skip before native adapters initialize; failed jobs resume from per-input sidecars
+## Implementation Rules
 
-## Hardware Requirements
-- AMD GPU with a compatible ROCm release
-- Python 3.12+
-- Sufficient GPU memory for the managed Whisper and translation models
+- Target Python 3.12. Use built-in generics and `T | None` syntax.
+- Type all public functions and methods. Avoid untyped dictionaries at module
+  boundaries.
+- Use `pathlib.Path` for filesystem paths and resolve external inputs early.
+- Order imports as standard library, third-party packages, then absolute local
+  imports.
+- Keep fixed managed paths and runtime constants in `src/config.py`.
+- Use `src.logger.logger`; include relevant input or stage context in messages.
+- Catch errors at I/O and native-runtime boundaries. Preserve causes and report
+  subprocess return codes and useful stderr context.
+- Use `argparse` for command-line entry points and document every public option.
+- Use `pysrt` for SRT handling. Preserve timestamps during text-only changes,
+  re-index after structural changes, and save with UTF-8 encoding. Publish final
+  translation output atomically.
+- Require system `ffmpeg` and `ffprobe`. Extract 16 kHz mono 16-bit PCM WAV and
+  consume machine-readable progress output.
+- Keep the managed whisper.cpp and vLLM profiles fixed unless measurements
+  justify changing the project baseline.
+
+## Testing
+
+Tests live under `tests/` and run with pytest. Add a focused regression test for
+every behavior change.
+
+Prefer unit tests that replace native-process boundaries and do not require a
+GPU. Use `tests/example.mp4` and `tests/example_en.mp3` only when real media is
+needed to cover an adapter boundary. Validate actual ROCm, whisper.cpp, or vLLM
+execution manually when the native integration changes.
+
+## Verified Runtime
+
+- Python 3.12
+- WSL2 on x86-64 Linux
+- AMD Radeon RX 9070 XT (`gfx1201`)
+- system ROCm 7.2.4
+- vLLM 0.25.1 `rocm723` wheel stack
+
+Other compatible AMD GPUs may work but are outside the current tested baseline.

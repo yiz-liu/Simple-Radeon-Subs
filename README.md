@@ -13,10 +13,15 @@ Silero VAD. The standalone Python Silero stage has been removed.
 
 ## Requirements
 
-- Linux or WSL2
+- x86-64 Linux or WSL2
 - [uv](https://docs.astral.sh/uv/)
-- System `ffmpeg` and `ffprobe` available on `PATH`
-- ROCm-compatible AMD GPU for ASR and translation acceleration
+- system `ffmpeg` and `ffprobe` on `PATH`
+- system ROCm with `hipcc` and `rocminfo`
+- Git and CMake for the managed whisper.cpp build
+
+The verified target is WSL2 with an AMD Radeon RX 9070 XT (`gfx1201`), system
+ROCm 7.2.4, and the vLLM 0.25.1 `rocm723` wheel stack. Other compatible AMD
+GPUs may work but are not part of the current tested baseline.
 
 Install FFmpeg on Ubuntu or WSL:
 
@@ -45,6 +50,10 @@ declarations directly, run:
 ```bash
 uv lock --managed-python
 ```
+
+The Tsinghua mirror is the default package index, while vLLM is explicitly
+sourced from its ROCm wheel index. The committed lock intentionally records
+those sources; normal `--locked` syncs do not need command-line index overrides.
 
 Create the base environment from the committed lock file:
 
@@ -80,10 +89,10 @@ source .venv/bin/activate
 
 `uv sync` installs the locked Python dependencies. The scripts separately patch
 the supported vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
-GPU reported by `rocminfo`, download and verify the Whisper, VAD, and translation
-weights, and check the completed environment. uv does not compile whisper.cpp or
-download model weights. The translation model is stored at
-`models/Qwen3.5-9B-AWQ-4bit`.
+targets reported by `rocminfo`, and download verified weights. The doctor checks
+the system tools, Python GPU stack, whisper-cli, and ASR assets; the download
+script verifies the translation model. uv does not compile whisper.cpp or own
+model weights. See [DEVLOG.md](DEVLOG.md) for the environment design history.
 
 ## Audio Extraction
 
@@ -111,7 +120,7 @@ Useful options:
 
 - `--src-lang`: source language code; whisper.cpp auto-detects it when omitted
 - `--keep-temp`: preserve successful per-input sidecars containing intermediate WAV and SRT files
-- `--force`: ignore the final subtitle and rebuild that input from a clean sidecar
+- `--force`: delete managed intermediates and rebuild every stage for that input
 - `--translated-only`: omit source text from the final subtitles
 
 Directory runs are organized by stage: FFmpeg extracts every pending input,
@@ -150,8 +159,9 @@ python -m src.translate /path/to/subtitles.srt --lang French --translated-only
 The backend uses a fixed vLLM profile. Each request owns 16 subtitle cues and
 includes up to four translated cues of context on either side. Structured
 output preserves the cue mapping, and incomplete responses are rejected instead
-of being written as partial subtitles. Request sizing is intentionally not a
-CLI option.
+of being written as partial subtitles. Generation is capped at 2048 tokens per
+request; failures report the owned and contextual cue ranges. Request sizing is
+intentionally not a CLI option.
 
 ## Standalone Transcription
 
@@ -176,10 +186,12 @@ Run conservative SRT cleanup independently with:
 python -m src.clean /path/to/subtitles.srt -o cleaned.srt
 ```
 
-Cleanup trims surrounding whitespace, removes empty or punctuation-only cues,
-and removes cues made from four or more identical effective characters. Two
-identical consecutive cues are merged when their gap is at most 250 ms; close
-runs of three or more identical cues are discarded. Other content is preserved.
+Cleanup replaces malformed UTF-8 with `U+FFFD`, trims surrounding whitespace,
+and removes empty or punctuation-only cues. It removes four or more identical
+effective characters, and removes text of at least 32 effective characters when
+a 2-8 character phrase repeats consecutively at least four times. Two identical
+consecutive cues are merged when their gap is at most 250 ms; close runs of
+three or more identical cues are discarded. Other content is preserved.
 
 ## Managed whisper.cpp ASR Profile
 
@@ -224,6 +236,16 @@ timestamps, and carries no local workaround. When upstream fixes segment-level
 SRT mapping, update the pinned `WHISPER_CPP_COMMIT`, verify it against the ASR
 fixture and a representative long recording, then remove this note.
 
+### whisper.cpp invalid UTF-8
+
+large-v3-turbo can occasionally end a segment on an incomplete byte-level token
+and write invalid UTF-8. This remains open upstream in
+[#3760](https://github.com/ggml-org/whisper.cpp/issues/3760).
+
+The cleanup boundary decodes malformed input with replacement, logs the byte
+position, and continues with conservative filtering. Remove this workaround only
+after the pinned whisper.cpp build consistently emits valid segment-level SRT.
+
 ### vLLM ROCm detection under WSL
 
 The pinned `vllm==0.25.1+rocm723` wheel cannot reliably detect ROCm when WSL
@@ -252,7 +274,13 @@ Run the project checks from the activated environment:
 ```bash
 pytest
 ruff check .
+basedpyright --level error run.py src tests
 ```
+
+`basedpyright` is an optional external developer tool and is not installed into
+the project environment. Install it through the editor toolchain or npm when
+type checking is required; Node.js is not a runtime requirement for the
+application.
 
 Project dependencies must be declared in `pyproject.toml`. Do not install
 undeclared packages directly into `.venv`. Commit `uv.lock` whenever dependency
