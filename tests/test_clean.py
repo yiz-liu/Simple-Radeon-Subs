@@ -31,7 +31,7 @@ def _clean(
     return pysrt.open(str(output_path), encoding="utf-8")
 
 
-def test_clean_srt_preserves_meaningful_short_long_and_marked_up_cues(
+def test_clean_srt_preserves_meaningful_text_and_markup(
     tmp_path: Path,
 ) -> None:
     # Given: Meaningful cues that the previous language and duration heuristics removed.
@@ -43,11 +43,34 @@ def test_clean_srt_preserves_meaningful_short_long_and_marked_up_cues(
     # When: The conservative cleaner processes them.
     cleaned = _clean(tmp_path, items)
 
-    # Then: Only surrounding whitespace changes.
+    # Then: Content is preserved while long cue timestamps keep only their endings.
     assert [(item.text, item.start.ordinal, item.end.ordinal) for item in cleaned] == [
-        ("I", 0, 10_000),
-        ("<i>Stay</i> [aside] ♪", 10_100, 50_000),
+        ("I", 8_000, 10_000),
+        ("<i>Stay</i> [aside] ♪", 48_000, 50_000),
     ]
+
+
+@pytest.mark.parametrize(
+    ("span_ms", "expected_span_ms"),
+    (
+        ((1_000, 6_000), (1_000, 6_000)),
+        ((1_000, 6_001), (4_001, 6_001)),
+    ),
+)
+def test_clean_srt_keeps_only_the_final_two_seconds_when_duration_exceeds_five(
+    tmp_path: Path,
+    span_ms: tuple[int, int],
+    expected_span_ms: tuple[int, int],
+) -> None:
+    # Given: A cue at or immediately beyond the five-second boundary.
+    items = [_subtitle(1, span_ms, "Keep the ending")]
+
+    # When: The cleaner normalizes its timeline.
+    cleaned = _clean(tmp_path, items)
+
+    # Then: Only a duration over five seconds moves the start to two seconds
+    # before the unchanged end.
+    assert (cleaned[0].start.ordinal, cleaned[0].end.ordinal) == expected_span_ms
 
 
 def test_clean_srt_removes_only_empty_punctuation_and_excessive_repetition(

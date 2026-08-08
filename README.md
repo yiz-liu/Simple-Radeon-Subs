@@ -191,7 +191,9 @@ and removes empty or punctuation-only cues. It removes four or more identical
 effective characters, and removes text of at least 32 effective characters when
 a 2-8 character phrase repeats consecutively at least four times. Two identical
 consecutive cues are merged when their gap is at most 250 ms; close runs of
-three or more identical cues are discarded. Other content is preserved.
+three or more identical cues are discarded. Every cue longer than five seconds
+keeps its end timestamp and moves its start timestamp so that only its final two
+seconds remain. Other content is preserved.
 
 ## Managed whisper.cpp ASR Profile
 
@@ -231,10 +233,11 @@ This is tracked upstream in
 [#3584](https://github.com/ggml-org/whisper.cpp/issues/3584) and
 [#3634](https://github.com/ggml-org/whisper.cpp/issues/3634).
 
-The project currently preserves these cues instead of deleting or guessing new
-timestamps, and carries no local workaround. When upstream fixes segment-level
-SRT mapping, update the pinned `WHISPER_CPP_COMMIT`, verify it against the ASR
-fixture and a representative long recording, then remove this note.
+As a local workaround, subtitle cleanup shortens every cue longer than five
+seconds to its final two seconds while preserving the original end timestamp.
+When upstream fixes segment-level SRT mapping, update the pinned
+`WHISPER_CPP_COMMIT`, verify it against the ASR fixture and a representative
+long recording, then reassess this cleanup rule and update this note.
 
 ### whisper.cpp invalid UTF-8
 

@@ -11,7 +11,8 @@ from src.logger import logger
 DUPLICATE_MERGE_GAP_MS: Final = 250
 EXCESSIVE_REPETITION_LENGTH: Final = 4
 PHRASE_LOOP_TEXT_LENGTH: Final = 32
-LONG_SUBTITLE_DURATION_MS: Final = 30_000
+MAX_SUBTITLE_DURATION_MS: Final = 5_000
+SHORTENED_SUBTITLE_DURATION_MS: Final = 2_000
 NON_WORD_PATTERN: Final = re.compile(r"[^\w]", flags=re.UNICODE)
 PHRASE_LOOP_PATTERN: Final = re.compile(r"(.{2,8})\1{3,}")
 
@@ -138,12 +139,12 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
 
     final_subtitles = filter_consecutive_duplicates(normalized)
     for index, subtitle in enumerate(final_subtitles, start=1):
+        if subtitle.end.ordinal - subtitle.start.ordinal > MAX_SUBTITLE_DURATION_MS:
+            subtitle.start = pysrt.SubRipTime(
+                milliseconds=subtitle.end.ordinal - SHORTENED_SUBTITLE_DURATION_MS
+            )
         subtitle.index = index
 
-    long_duration_count = sum(
-        subtitle.end.ordinal - subtitle.start.ordinal > LONG_SUBTITLE_DURATION_MS
-        for subtitle in final_subtitles
-    )
     overlap_count = sum(
         current.start.ordinal < previous.end.ordinal
         for previous, current in pairwise(final_subtitles)
@@ -154,11 +155,6 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
         encoding="utf-8",
     )
 
-    if long_duration_count:
-        logger.warning(
-            "Preserved %d subtitle(s) longer than 30 seconds.",
-            long_duration_count,
-        )
     if overlap_count:
         logger.warning(
             "Preserved %d overlapping subtitle(s).",
