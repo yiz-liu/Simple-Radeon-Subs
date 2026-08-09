@@ -58,7 +58,7 @@ class _Arguments(argparse.Namespace):
     keep_temp: bool = False
     force: bool = False
     translated_only: bool = False
-    enable_vad: bool = False
+    enable_vad: bool = True
 
 
 def _parse_arguments() -> _Arguments:
@@ -90,9 +90,10 @@ def _parse_arguments() -> _Arguments:
         help="Generate translated subtitles without source text.",
     )
     _ = parser.add_argument(
-        "--enable-vad",
-        action="store_true",
-        help="Enable integrated VAD with the fixed tested profile.",
+        "--disable-vad",
+        action="store_false",
+        dest="enable_vad",
+        help="Disable integrated VAD and transcribe the complete audio stream.",
     )
     return parser.parse_args(namespace=_Arguments())
 

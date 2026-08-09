@@ -53,14 +53,15 @@ def test_module_cli_exposes_only_the_fixed_adapter_options() -> None:
         timeout=30,
     )
 
-    # Then: Only input, output, language, and quiet controls remain.
+    # Then: Only fixed adapter controls, including the VAD opt-out, remain.
     assert completed.returncode == 0
     assert all(
-        flag in completed.stdout for flag in ("--output-dir", "--language", "--quiet")
+        flag in completed.stdout
+        for flag in ("--output-dir", "--language", "--quiet", "--disable-vad")
     )
     assert all(
         flag not in completed.stdout
-        for flag in ("--model", "--device", "--verbose-text")
+        for flag in ("--model", "--device", "--verbose-text", "--enable-vad")
     )
 
 
@@ -79,6 +80,8 @@ def test_pipeline_cli_does_not_expose_asr_model_selection() -> None:
     # Then: The fixed ASR model is not a user-selectable option.
     assert completed.returncode == 0
     assert "--model" not in completed.stdout
+    assert "--disable-vad" in completed.stdout
+    assert "--enable-vad" not in completed.stdout
 
 
 def test_module_cli_rejects_a_missing_audio_file_without_creating_an_srt(

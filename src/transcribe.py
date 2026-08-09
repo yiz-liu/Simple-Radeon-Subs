@@ -26,7 +26,7 @@ class Transcriber:
         tasks: tuple[TranscriptionTask, ...],
         language: str | None = None,
         quiet: bool = False,
-        enable_vad: bool = False,
+        enable_vad: bool = True,
     ) -> list[TranscriptionFailure]:
         """Create multiple SRT files with one native model load."""
         if tasks:
@@ -52,7 +52,7 @@ class Transcriber:
         output_dir: str | Path | None = None,
         language: str | None = None,
         quiet: bool = False,
-        enable_vad: bool = False,
+        enable_vad: bool = True,
     ) -> Path:
         """Create an SRT beside the audio or in the requested output directory."""
         audio_file = Path(audio_path).resolve()
@@ -75,7 +75,7 @@ class _Arguments(argparse.Namespace):
     output_dir: str | None = None
     language: str | None = None
     quiet: bool = False
-    enable_vad: bool = False
+    enable_vad: bool = True
 
 
 def main() -> int:
@@ -98,9 +98,10 @@ def main() -> int:
         help="Disable transcription progress output.",
     )
     _ = parser.add_argument(
-        "--enable-vad",
-        action="store_true",
-        help="Enable integrated VAD with the fixed tested profile.",
+        "--disable-vad",
+        action="store_false",
+        dest="enable_vad",
+        help="Disable integrated VAD and transcribe the complete audio stream.",
     )
     arguments = parser.parse_args(namespace=_Arguments())
     try:

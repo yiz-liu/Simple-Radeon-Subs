@@ -31,7 +31,7 @@ class PipelineOptions:
     keep_temp: bool = False
     force: bool = False
     translated_only: bool = False
-    enable_vad: bool = False
+    enable_vad: bool = True
 
 
 @dataclass(frozen=True, slots=True)

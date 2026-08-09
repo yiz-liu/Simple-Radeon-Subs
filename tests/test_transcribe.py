@@ -110,15 +110,20 @@ def _assert_process_is_gone(runtime: FakeRuntime) -> None:
         os.kill(pid, 0)
 
 
-def test_transcribe_defaults_to_the_recommended_vad_off_profile(
+def test_transcribe_can_disable_vad_and_preserves_a_dotted_stem(
     fake_runtime: FakeRuntime,
     tmp_path: Path,
 ) -> None:
-    # Given: A managed native runtime and an audio file with a dotted stem.
+    # Given: A managed runtime, a dotted audio stem, and explicitly disabled VAD.
     output_dir = tmp_path / "subtitles"
 
-    # When: Transcription runs without an explicit language.
-    result = Transcriber().transcribe(fake_runtime.audio, output_dir, quiet=True)
+    # When: Transcription runs without an explicit language or VAD.
+    result = Transcriber().transcribe(
+        fake_runtime.audio,
+        output_dir,
+        quiet=True,
+        enable_vad=False,
+    )
 
     # Then: The fixed profile reaches the native CLI and preserves the dotted stem.
     arguments = _recorded_arguments(fake_runtime)
@@ -145,11 +150,11 @@ def test_transcribe_defaults_to_the_recommended_vad_off_profile(
     assert Path(arguments[-1]).parent.parent == output_dir.resolve()
 
 
-def test_transcribe_enable_vad_uses_the_best_tested_profile(
+def test_transcribe_uses_the_best_tested_vad_profile_by_default(
     fake_runtime: FakeRuntime,
 ) -> None:
-    # Given / When: The caller explicitly enables integrated VAD.
-    _ = Transcriber().transcribe(fake_runtime.audio, quiet=True, enable_vad=True)
+    # Given / When: The caller uses the default integrated VAD profile.
+    _ = Transcriber().transcribe(fake_runtime.audio, quiet=True)
 
     # Then: The VAD model and the best parameters from the three-sample study apply.
     arguments = _recorded_arguments(fake_runtime)
@@ -323,11 +328,7 @@ def test_transcribe_names_a_missing_managed_prerequisite(
 
     # When / Then: Validation names the unavailable absolute path.
     with pytest.raises(FileNotFoundError, match=str(missing)):
-        _ = Transcriber().transcribe(
-            fake_runtime.audio,
-            quiet=True,
-            enable_vad=constant_name == "WHISPER_VAD_MODEL_PATH",
-        )
+        _ = Transcriber().transcribe(fake_runtime.audio, quiet=True)
 
 
 def test_transcribe_does_not_require_the_vad_model_when_disabled(
@@ -342,8 +343,12 @@ def test_transcribe_does_not_require_the_vad_model_when_disabled(
         tmp_path / "missing-vad-model.bin",
     )
 
-    # When / Then: The default VAD-off transcription still succeeds.
-    assert Transcriber().transcribe(fake_runtime.audio, quiet=True).is_file()
+    # When / Then: Explicitly disabled VAD does not require its managed model.
+    assert Transcriber().transcribe(
+        fake_runtime.audio,
+        quiet=True,
+        enable_vad=False,
+    ).is_file()
 
 
 def test_transcribe_many_uses_one_process_and_publishes_each_output(

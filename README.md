@@ -9,8 +9,8 @@ video -> FFmpeg audio extraction -> ASR -> subtitle cleanup -> translation
 ```
 
 The integrated ASR backend is whisper.cpp built with HIP. Its built-in Silero
-VAD is available as an opt-in mode; the standalone Python Silero stage has been
-removed.
+VAD uses the fixed tested profile by default; the standalone Python Silero stage
+has been removed.
 
 ## Requirements
 
@@ -114,7 +114,7 @@ python run.py /path/to/video.mp4
 python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
 python run.py /path/to/video.mp4 --keep-temp
 python run.py /path/to/video.mp4 --translated-only
-python run.py /path/to/video.mp4 --enable-vad
+python run.py /path/to/video.mp4 --disable-vad
 python run.py /path/to/media-directory/
 ```
 
@@ -124,7 +124,7 @@ Useful options:
 - `--keep-temp`: preserve successful per-input sidecars containing intermediate WAV and SRT files
 - `--force`: delete managed intermediates and rebuild every stage for that input
 - `--translated-only`: omit source text from the final subtitles
-- `--enable-vad`: enable whisper.cpp integrated VAD with the fixed tested settings
+- `--disable-vad`: transcribe the complete audio stream without integrated VAD
 
 Directory runs are organized by stage: FFmpeg extracts every pending input,
 whisper.cpp transcribes all pending audio files with one model load, cleanup runs
@@ -175,7 +175,7 @@ explicit language code:
 python -m src.transcribe /path/to/audio.wav -o ./subs
 python -m src.transcribe /path/to/audio.wav -o ./subs -l de
 python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
-python -m src.transcribe /path/to/audio.wav -o ./subs --enable-vad
+python -m src.transcribe /path/to/audio.wav -o ./subs --disable-vad
 ```
 
 The command displays native transcription progress by default. `--quiet` hides
@@ -193,11 +193,12 @@ python -m src.clean /path/to/subtitles.srt -o cleaned.srt
 Cleanup replaces malformed UTF-8 with `U+FFFD`, trims surrounding whitespace,
 and removes empty or punctuation-only cues. It removes four or more identical
 effective characters, and removes text of at least 32 effective characters when
-a 2-8 character phrase repeats consecutively at least four times. Two identical
-consecutive cues are merged when their gap is at most 250 ms; close runs of
-three or more identical cues are discarded. Every cue longer than five seconds
-keeps its end timestamp and moves its start timestamp so that only its final two
-seconds remain. Other content is preserved.
+a 2-8 character phrase repeats consecutively at least four times. Remaining
+exact repetitions of a 1-8 character unit are limited to three consecutive
+copies. Two identical consecutive cues are merged when their gap is at most 250
+ms; close runs of three or more identical cues are discarded. Every cue longer
+than five seconds keeps its end timestamp and moves its start timestamp so that
+only its final two seconds remain. Other content is preserved.
 
 ## Managed whisper.cpp ASR Profile
 
@@ -216,12 +217,12 @@ The default quality-oriented decoder settings are:
 model: large-v3-turbo
 processors: 1
 beam size: 5
-max context: 0
-non-speech token suppression: enabled
-VAD: disabled
+max context: 48
+non-speech token suppression: disabled
+VAD: enabled
 ```
 
-`--enable-vad` selects the best integrated-VAD profile from the three-sample
+The default integrated-VAD settings use the best profile from the three-sample
 comparison:
 
 ```text
@@ -234,6 +235,9 @@ VAD speech padding: 500 ms
 VAD sample overlap: 0 s
 ```
 
+`--disable-vad` changes max context to `0`, enables non-speech token
+suppression, and transcribes the complete audio stream without the VAD model.
+
 These settings are internal and fixed. Input files in a directory batch are
 processed one after another by `whisper-cli` while reusing the loaded model.
 
@@ -241,7 +245,7 @@ processed one after another by `whisper-cli` while reusing the loaded model.
 
 ### whisper.cpp VAD timestamps
 
-When opt-in built-in VAD removes a long silence, whisper.cpp may decode across
+When built-in VAD removes a long silence, whisper.cpp may decode across
 the compressed boundary and map one short subtitle over the entire original gap.
 This is tracked upstream in
 [#3584](https://github.com/ggml-org/whisper.cpp/issues/3584) and

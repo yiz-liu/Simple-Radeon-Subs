@@ -83,7 +83,7 @@ class WhisperBatchRunner:
         tasks: tuple[TranscriptionTask, ...],
         language: str | None,
         quiet: bool,
-        enable_vad: bool = False,
+        enable_vad: bool = True,
     ) -> list[TranscriptionFailure]:
         if not tasks:
             return []

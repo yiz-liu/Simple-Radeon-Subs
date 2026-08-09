@@ -25,18 +25,18 @@ def test_directory_scan_excludes_managed_sidecars(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("extra_arguments", "expected"),
-    (([], False), (["--enable-vad"], True)),
+    (([], True), (["--disable-vad"], False)),
 )
-def test_vad_is_opt_in_from_the_pipeline_cli(
+def test_vad_is_enabled_by_default_from_the_pipeline_cli(
     monkeypatch: pytest.MonkeyPatch,
     extra_arguments: list[str],
     expected: bool,
 ) -> None:
-    # Given: A normal pipeline invocation, optionally requesting integrated VAD.
+    # Given: A normal pipeline invocation, optionally disabling integrated VAD.
     monkeypatch.setattr(
         "sys.argv",
         ["run.py", "movie.mkv", *extra_arguments],
     )
 
-    # When / Then: VAD is disabled by default and enabled only by its flag.
+    # When / Then: VAD is enabled by default and disabled only by its flag.
     assert _parse_arguments().enable_vad is expected

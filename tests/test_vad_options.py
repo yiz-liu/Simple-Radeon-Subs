@@ -8,16 +8,16 @@ def test_vad_modes_use_separate_transcription_sidecars(tmp_path: Path) -> None:
     source = tmp_path / "movie.mkv"
     source.touch()
 
-    # When: Jobs are built for the default and opt-in VAD modes.
-    without_vad = build_jobs(
+    # When: Jobs are built for the default and explicitly disabled VAD modes.
+    with_vad = build_jobs(
         PipelinePlan((source,), tmp_path, None, PipelineOptions())
     )[0]
-    with_vad = build_jobs(
+    without_vad = build_jobs(
         PipelinePlan(
             (source,),
             tmp_path,
             None,
-            PipelineOptions(enable_vad=True),
+            PipelineOptions(enable_vad=False),
         )
     )[0]
 
