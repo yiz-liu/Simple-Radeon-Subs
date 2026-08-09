@@ -119,11 +119,10 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
 
     subtitle: pysrt.SubRipItem
     for subtitle in subtitles:
-        start_ms = subtitle.start.ordinal
-        end_ms = subtitle.end.ordinal
-        if end_ms <= start_ms:
-            raise InvalidSubtitleTimelineError(subtitle.index, start_ms, end_ms)
-
+        if subtitle.end.ordinal < subtitle.start.ordinal:
+            raise InvalidSubtitleTimelineError(
+                subtitle.index, subtitle.start.ordinal, subtitle.end.ordinal
+            )
         text = clean_text(subtitle.text)
         if is_garbage(text) or is_excessive_repetition(text):
             continue
@@ -137,13 +136,19 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
             )
         )
 
-    final_subtitles = filter_consecutive_duplicates(normalized)
-    for index, subtitle in enumerate(final_subtitles, start=1):
+    deduplicated = filter_consecutive_duplicates(normalized)
+    final_subtitles: list[pysrt.SubRipItem] = []
+    zero_duration_count = 0
+    for subtitle in deduplicated:
+        if subtitle.end.ordinal == subtitle.start.ordinal:
+            zero_duration_count += 1
+            continue
         if subtitle.end.ordinal - subtitle.start.ordinal > MAX_SUBTITLE_DURATION_MS:
             subtitle.start = pysrt.SubRipTime(
                 milliseconds=subtitle.end.ordinal - SHORTENED_SUBTITLE_DURATION_MS
             )
-        subtitle.index = index
+        subtitle.index = len(final_subtitles) + 1
+        final_subtitles.append(subtitle)
 
     overlap_count = sum(
         current.start.ordinal < previous.end.ordinal
@@ -164,8 +169,8 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
         "Cleaned subtitles: %d input, %d safely filtered, "
         + "%d merged or duplicate-filtered, %d output.",
         original_count,
-        original_count - len(normalized),
-        len(normalized) - len(final_subtitles),
+        original_count - len(normalized) + zero_duration_count,
+        len(normalized) - len(deduplicated),
         len(final_subtitles),
     )
 

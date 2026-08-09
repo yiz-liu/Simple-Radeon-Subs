@@ -174,6 +174,26 @@ def test_clean_srt_discards_three_duplicates_in_one_close_run(tmp_path: Path) ->
     assert cleaned == []
 
 
+def test_clean_srt_filters_zero_duration_cue_inside_duplicate_run(
+    tmp_path: Path,
+) -> None:
+    # Given: whisper.cpp emitted a zero-duration cue inside one repeated run.
+    items = [
+        _subtitle(1, (0, 1_000), "Repeated line"),
+        _subtitle(2, (1_000, 1_000), "Repeated line"),
+        _subtitle(3, (1_000, 2_000), "Repeated line"),
+        _subtitle(4, (2_000, 3_000), "Next line"),
+    ]
+
+    # When: The conservative cleaner processes the native output.
+    cleaned = _clean(tmp_path, items)
+
+    # Then: The repeated hallucination is removed before strict timeline validation.
+    assert [(item.text, item.start.ordinal, item.end.ordinal) for item in cleaned] == [
+        ("Next line", 2_000, 3_000)
+    ]
+
+
 def test_clean_srt_does_not_discard_duplicates_across_a_large_gap(
     tmp_path: Path,
 ) -> None:
@@ -195,9 +215,24 @@ def test_clean_srt_does_not_discard_duplicates_across_a_large_gap(
     ]
 
 
-def test_clean_srt_rejects_a_non_positive_duration(tmp_path: Path) -> None:
-    # Given: A structurally invalid zero-duration cue.
-    items = [_subtitle(1, (1_000, 1_000), "Broken timeline")]
+def test_clean_srt_discards_a_zero_duration_cue(tmp_path: Path) -> None:
+    # Given: A zero-duration native cue that no subtitle renderer can display.
+    items = [_subtitle(1, (1_000, 1_000), "Invisible text")]
+
+    # When: The conservative cleaner processes it.
+    cleaned = _clean(tmp_path, items)
+
+    # Then: The unrenderable cue is discarded.
+    assert cleaned == []
+
+
+def test_clean_srt_rejects_a_negative_duration(tmp_path: Path) -> None:
+    # Given: A negative-duration cue is surrounded by matching duplicates.
+    items = [
+        _subtitle(1, (0, 1_000), "Broken timeline"),
+        _subtitle(2, (1_000, 900), "Broken timeline"),
+        _subtitle(3, (900, 2_000), "Broken timeline"),
+    ]
 
     # When / Then: The cleaner rejects it instead of deleting it silently.
     with pytest.raises(ValueError):
