@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from run import scan_directory
+import pytest
+
+from run import _parse_arguments, scan_directory
 
 
 def test_directory_scan_excludes_managed_sidecars(tmp_path: Path) -> None:
@@ -19,3 +21,22 @@ def test_directory_scan_excludes_managed_sidecars(tmp_path: Path) -> None:
 
     # Then: Only user media is returned; pipeline-owned audio stays internal.
     assert discovered == [source, nested]
+
+
+@pytest.mark.parametrize(
+    ("extra_arguments", "expected"),
+    (([], False), (["--enable-vad"], True)),
+)
+def test_vad_is_opt_in_from_the_pipeline_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_arguments: list[str],
+    expected: bool,
+) -> None:
+    # Given: A normal pipeline invocation, optionally requesting integrated VAD.
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run.py", "movie.mkv", *extra_arguments],
+    )
+
+    # When / Then: VAD is disabled by default and enabled only by its flag.
+    assert _parse_arguments().enable_vad is expected

@@ -26,6 +26,7 @@ class Transcriber:
         tasks: tuple[TranscriptionTask, ...],
         language: str | None = None,
         quiet: bool = False,
+        enable_vad: bool = False,
     ) -> list[TranscriptionFailure]:
         """Create multiple SRT files with one native model load."""
         if tasks:
@@ -37,7 +38,7 @@ class Transcriber:
                 vad_model_path=WHISPER_VAD_MODEL_PATH,
             )
         )
-        failures = runner.run(tasks, language, quiet)
+        failures = runner.run(tasks, language, quiet, enable_vad)
         logger.info(
             "Transcription batch complete: %d succeeded, %d failed.",
             len(tasks) - len(failures),
@@ -51,13 +52,19 @@ class Transcriber:
         output_dir: str | Path | None = None,
         language: str | None = None,
         quiet: bool = False,
+        enable_vad: bool = False,
     ) -> Path:
         """Create an SRT beside the audio or in the requested output directory."""
         audio_file = Path(audio_path).resolve()
         output_directory = Path(output_dir or audio_file.parent).resolve()
         destination = output_directory / f"{audio_file.stem}.srt"
         task = TranscriptionTask(audio_file, destination)
-        failures = self.transcribe_many((task,), language=language, quiet=quiet)
+        failures = self.transcribe_many(
+            (task,),
+            language=language,
+            quiet=quiet,
+            enable_vad=enable_vad,
+        )
         if failures:
             raise RuntimeError(failures[0].reason)
         return destination
@@ -68,6 +75,7 @@ class _Arguments(argparse.Namespace):
     output_dir: str | None = None
     language: str | None = None
     quiet: bool = False
+    enable_vad: bool = False
 
 
 def main() -> int:
@@ -75,7 +83,9 @@ def main() -> int:
         description="Transcribe audio files using the managed whisper.cpp CLI."
     )
     _ = parser.add_argument("input", help="Path to the input audio file.")
-    _ = parser.add_argument("-o", "--output-dir", help="Directory to save the SRT file.")
+    _ = parser.add_argument(
+        "-o", "--output-dir", help="Directory to save the SRT file."
+    )
     _ = parser.add_argument(
         "-l",
         "--language",
@@ -87,6 +97,11 @@ def main() -> int:
         action="store_true",
         help="Disable transcription progress output.",
     )
+    _ = parser.add_argument(
+        "--enable-vad",
+        action="store_true",
+        help="Enable integrated VAD with the fixed tested profile.",
+    )
     arguments = parser.parse_args(namespace=_Arguments())
     try:
         _ = Transcriber().transcribe(
@@ -94,6 +109,7 @@ def main() -> int:
             output_dir=arguments.output_dir,
             language=arguments.language,
             quiet=arguments.quiet,
+            enable_vad=arguments.enable_vad,
         )
     except (OSError, RuntimeError) as error:
         logger.error("Transcription failed: %s", error)

@@ -57,8 +57,11 @@ class WhisperRuntime:
     model_path: Path
     vad_model_path: Path
 
-    def validate(self) -> None:
-        for prerequisite in (self.model_path, self.vad_model_path):
+    def validate(self, enable_vad: bool) -> None:
+        prerequisites = (
+            (self.model_path, self.vad_model_path) if enable_vad else (self.model_path,)
+        )
+        for prerequisite in prerequisites:
             if not prerequisite.is_file():
                 raise FileNotFoundError(
                     f"Managed transcription prerequisite not found: {prerequisite}"
@@ -80,10 +83,11 @@ class WhisperBatchRunner:
         tasks: tuple[TranscriptionTask, ...],
         language: str | None,
         quiet: bool,
+        enable_vad: bool = False,
     ) -> list[TranscriptionFailure]:
         if not tasks:
             return []
-        self.runtime.validate()
+        self.runtime.validate(enable_vad)
         for task in tasks:
             if not task.audio_path.is_file():
                 raise FileNotFoundError(f"Audio file not found: {task.audio_path}")
@@ -108,7 +112,7 @@ class WhisperBatchRunner:
                 staged_outputs.append(Path(f"{staged}.srt"))
 
             process: subprocess.Popen[str] = subprocess.Popen(
-                self._command(tuple(staged_audio), language),
+                self._command(tuple(staged_audio), language, enable_vad),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -162,13 +166,12 @@ class WhisperBatchRunner:
         self,
         audio_paths: tuple[Path, ...],
         language: str | None,
+        enable_vad: bool,
     ) -> list[str]:
-        return [
+        command = [
             str(self.runtime.cli_path),
             "--model",
             str(self.runtime.model_path),
-            "--vad-model",
-            str(self.runtime.vad_model_path),
             "--output-srt",
             "--language",
             language or "auto",
@@ -177,24 +180,33 @@ class WhisperBatchRunner:
             "--beam-size",
             "5",
             "--max-context",
-            "48",
-            "--vad",
-            "--vad-threshold",
-            "0.15",
-            "--vad-min-speech-duration-ms",
-            "250",
-            "--vad-min-silence-duration-ms",
-            "120",
-            "--vad-max-speech-duration-s",
-            "30",
-            "--vad-speech-pad-ms",
-            "250",
-            "--vad-samples-overlap",
             "0",
+            "--suppress-nst",
             "--no-prints",
             "--print-progress",
-            *(str(path) for path in audio_paths),
         ]
+        if enable_vad:
+            command[command.index("--max-context") + 1] = "48"
+            command.remove("--suppress-nst")
+            command[3:3] = [
+                "--vad-model",
+                str(self.runtime.vad_model_path),
+                "--vad",
+                "--vad-threshold",
+                "0.05",
+                "--vad-min-speech-duration-ms",
+                "100",
+                "--vad-min-silence-duration-ms",
+                "120",
+                "--vad-max-speech-duration-s",
+                "10",
+                "--vad-speech-pad-ms",
+                "500",
+                "--vad-samples-overlap",
+                "0",
+            ]
+        command.extend(str(path) for path in audio_paths)
+        return command
 
     @staticmethod
     def _consume_progress(

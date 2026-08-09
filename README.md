@@ -8,8 +8,9 @@ The pipeline is:
 video -> FFmpeg audio extraction -> ASR -> subtitle cleanup -> translation
 ```
 
-The integrated ASR backend is whisper.cpp built with HIP, using its built-in
-Silero VAD. The standalone Python Silero stage has been removed.
+The integrated ASR backend is whisper.cpp built with HIP. Its built-in Silero
+VAD is available as an opt-in mode; the standalone Python Silero stage has been
+removed.
 
 ## Requirements
 
@@ -113,6 +114,7 @@ python run.py /path/to/video.mp4
 python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
 python run.py /path/to/video.mp4 --keep-temp
 python run.py /path/to/video.mp4 --translated-only
+python run.py /path/to/video.mp4 --enable-vad
 python run.py /path/to/media-directory/
 ```
 
@@ -122,6 +124,7 @@ Useful options:
 - `--keep-temp`: preserve successful per-input sidecars containing intermediate WAV and SRT files
 - `--force`: delete managed intermediates and rebuild every stage for that input
 - `--translated-only`: omit source text from the final subtitles
+- `--enable-vad`: enable whisper.cpp integrated VAD with the fixed tested settings
 
 Directory runs are organized by stage: FFmpeg extracts every pending input,
 whisper.cpp transcribes all pending audio files with one model load, cleanup runs
@@ -172,6 +175,7 @@ explicit language code:
 python -m src.transcribe /path/to/audio.wav -o ./subs
 python -m src.transcribe /path/to/audio.wav -o ./subs -l de
 python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
+python -m src.transcribe /path/to/audio.wav -o ./subs --enable-vad
 ```
 
 The command displays native transcription progress by default. `--quiet` hides
@@ -206,29 +210,39 @@ models/whisper/ggml-large-v3-turbo.bin
 models/whisper/ggml-silero-v6.2.0.bin
 ```
 
-The quality-oriented decoder and VAD settings are:
+The default quality-oriented decoder settings are:
 
 ```text
 model: large-v3-turbo
 processors: 1
 beam size: 5
+max context: 0
+non-speech token suppression: enabled
+VAD: disabled
+```
+
+`--enable-vad` selects the best integrated-VAD profile from the three-sample
+comparison:
+
+```text
 max context: 48
-VAD threshold: 0.15
-VAD minimum speech: 250 ms
+VAD threshold: 0.05
+VAD minimum speech: 100 ms
 VAD minimum silence: 120 ms
-VAD maximum speech: 30 s
-VAD speech padding: 250 ms
+VAD maximum speech: 10 s
+VAD speech padding: 500 ms
 VAD sample overlap: 0 s
 ```
 
-These settings are internal and fixed.
+These settings are internal and fixed. Input files in a directory batch are
+processed one after another by `whisper-cli` while reusing the loaded model.
 
 ## Known Issues
 
 ### whisper.cpp VAD timestamps
 
-When built-in VAD removes a long silence, whisper.cpp may decode across the
-compressed boundary and map one short subtitle over the entire original gap.
+When opt-in built-in VAD removes a long silence, whisper.cpp may decode across
+the compressed boundary and map one short subtitle over the entire original gap.
 This is tracked upstream in
 [#3584](https://github.com/ggml-org/whisper.cpp/issues/3584) and
 [#3634](https://github.com/ggml-org/whisper.cpp/issues/3634).

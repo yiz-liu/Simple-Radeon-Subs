@@ -31,6 +31,7 @@ class PipelineOptions:
     keep_temp: bool = False
     force: bool = False
     translated_only: bool = False
+    enable_vad: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,7 @@ def build_jobs(plan: PipelinePlan) -> tuple[PipelineJob, ...]:
     """Derive collision-safe sidecars and relative final output paths."""
     language_label = _safe_label(plan.options.target_lang)
     source_label = _safe_label(plan.options.src_lang or "auto")
+    vad_label = "vad" if plan.options.enable_vad else "no-vad"
     jobs: list[PipelineJob] = []
     for input_path in plan.input_paths:
         source = input_path.resolve()
@@ -96,7 +98,7 @@ def build_jobs(plan: PipelinePlan) -> tuple[PipelineJob, ...]:
             else plan.output_dir.resolve() / relative_parent
         )
         work_dir = source.parent / f".{source.name}{WORK_DIR_SUFFIX}"
-        asr_dir = work_dir / f"asr-{source_label}"
+        asr_dir = work_dir / f"asr-{source_label}-{vad_label}"
         jobs.append(
             PipelineJob(
                 input_path=source,
@@ -164,6 +166,7 @@ def run_pipeline(
                     for job in transcription_jobs
                 ),
                 language=options.src_lang,
+                enable_vad=options.enable_vad,
             )
             jobs_by_output = {job.raw_srt_path: job for job in transcription_jobs}
             for failure in transcription_failures:

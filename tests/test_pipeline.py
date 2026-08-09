@@ -47,8 +47,8 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
             return destination
 
     class FakeTranscriber:
-        def transcribe_many(self, tasks, language=None, quiet=False):
-            events.append(f"transcribe:{len(tasks)}")
+        def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
+            events.append(f"transcribe:{len(tasks)}:{enable_vad}")
             for task in tasks:
                 _write_srt(task.output_path, task.audio_path.stem)
             return []
@@ -74,6 +74,7 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
         keep_temp=True,
         force=True,
         translated_only=True,
+        enable_vad=True,
     )
     jobs = build_jobs(
         PipelinePlan(
@@ -90,7 +91,7 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     # Then: Stages are global, heavyweight adapters run once, and sources survive.
     assert result.failures == ()
     assert events[:2] == ["extract:first.wav", "extract:second.mp3"]
-    assert events[2] == "transcribe:2"
+    assert events[2] == "transcribe:2:True"
     assert events[3:5] == [
         "clean:.first.wav.simple-radeon-subs",
         "clean:.second.mp3.simple-radeon-subs",
@@ -126,7 +127,7 @@ def test_pipeline_isolates_failed_extraction_and_reports_failure(
             return destination
 
     class FakeTranscriber:
-        def transcribe_many(self, tasks, language=None, quiet=False):
+        def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
             assert [task.audio_path.parent.name for task in tasks] == [
                 ".healthy.mp4.simple-radeon-subs"
             ]
@@ -260,7 +261,7 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
             return destination
 
     class FakeTranscriber:
-        def transcribe_many(self, tasks, language=None, quiet=False):
+        def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
             for task in tasks:
                 _write_srt(task.output_path, "raw")
             return []

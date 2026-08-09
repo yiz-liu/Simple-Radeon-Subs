@@ -58,6 +58,7 @@ class _Arguments(argparse.Namespace):
     keep_temp: bool = False
     force: bool = False
     translated_only: bool = False
+    enable_vad: bool = False
 
 
 def _parse_arguments() -> _Arguments:
@@ -88,6 +89,11 @@ def _parse_arguments() -> _Arguments:
         action="store_true",
         help="Generate translated subtitles without source text.",
     )
+    _ = parser.add_argument(
+        "--enable-vad",
+        action="store_true",
+        help="Enable integrated VAD with the fixed tested profile.",
+    )
     return parser.parse_args(namespace=_Arguments())
 
 
@@ -114,6 +120,7 @@ def main() -> int:
         keep_temp=arguments.keep_temp,
         force=arguments.force,
         translated_only=arguments.translated_only,
+        enable_vad=arguments.enable_vad,
     )
     try:
         jobs = build_jobs(

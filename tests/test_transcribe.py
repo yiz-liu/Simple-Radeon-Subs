@@ -110,7 +110,7 @@ def _assert_process_is_gone(runtime: FakeRuntime) -> None:
         os.kill(pid, 0)
 
 
-def test_transcribe_uses_the_fixed_profile_and_auto_language(
+def test_transcribe_defaults_to_the_recommended_vad_off_profile(
     fake_runtime: FakeRuntime,
     tmp_path: Path,
 ) -> None:
@@ -124,13 +124,11 @@ def test_transcribe_uses_the_fixed_profile_and_auto_language(
     arguments = _recorded_arguments(fake_runtime)
     assert result == output_dir.resolve() / "movie.part.srt"
     assert result.read_bytes() == b""
-    assert arguments[:4] == [
+    assert arguments[:2] == [
         "--model",
         str(fake_runtime.model),
-        "--vad-model",
-        str(fake_runtime.vad_model),
     ]
-    assert arguments[4:-1] == [
+    assert arguments[2:-1] == [
         "--output-srt",
         "--language",
         "auto",
@@ -139,24 +137,31 @@ def test_transcribe_uses_the_fixed_profile_and_auto_language(
         "--beam-size",
         "5",
         "--max-context",
-        "48",
-        "--vad",
-        "--vad-threshold",
-        "0.15",
-        "--vad-min-speech-duration-ms",
-        "250",
-        "--vad-min-silence-duration-ms",
-        "120",
-        "--vad-max-speech-duration-s",
-        "30",
-        "--vad-speech-pad-ms",
-        "250",
-        "--vad-samples-overlap",
         "0",
+        "--suppress-nst",
         "--no-prints",
         "--print-progress",
     ]
     assert Path(arguments[-1]).parent.parent == output_dir.resolve()
+
+
+def test_transcribe_enable_vad_uses_the_best_tested_profile(
+    fake_runtime: FakeRuntime,
+) -> None:
+    # Given / When: The caller explicitly enables integrated VAD.
+    _ = Transcriber().transcribe(fake_runtime.audio, quiet=True, enable_vad=True)
+
+    # Then: The VAD model and the best parameters from the three-sample study apply.
+    arguments = _recorded_arguments(fake_runtime)
+    assert arguments[arguments.index("--max-context") + 1] == "48"
+    assert arguments[arguments.index("--vad-model") + 1] == str(fake_runtime.vad_model)
+    assert arguments[arguments.index("--vad-threshold") + 1] == "0.05"
+    assert arguments[arguments.index("--vad-min-speech-duration-ms") + 1] == "100"
+    assert arguments[arguments.index("--vad-min-silence-duration-ms") + 1] == "120"
+    assert arguments[arguments.index("--vad-max-speech-duration-s") + 1] == "10"
+    assert arguments[arguments.index("--vad-speech-pad-ms") + 1] == "500"
+    assert arguments[arguments.index("--vad-samples-overlap") + 1] == "0"
+    assert "--suppress-nst" not in arguments
 
 
 def test_transcribe_passes_an_explicit_language_and_overwrites_on_success(
@@ -318,7 +323,27 @@ def test_transcribe_names_a_missing_managed_prerequisite(
 
     # When / Then: Validation names the unavailable absolute path.
     with pytest.raises(FileNotFoundError, match=str(missing)):
-        _ = Transcriber().transcribe(fake_runtime.audio, quiet=True)
+        _ = Transcriber().transcribe(
+            fake_runtime.audio,
+            quiet=True,
+            enable_vad=constant_name == "WHISPER_VAD_MODEL_PATH",
+        )
+
+
+def test_transcribe_does_not_require_the_vad_model_when_disabled(
+    fake_runtime: FakeRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Given: The optional managed VAD model is unavailable.
+    monkeypatch.setattr(
+        transcribe_module,
+        "WHISPER_VAD_MODEL_PATH",
+        tmp_path / "missing-vad-model.bin",
+    )
+
+    # When / Then: The default VAD-off transcription still succeeds.
+    assert Transcriber().transcribe(fake_runtime.audio, quiet=True).is_file()
 
 
 def test_transcribe_many_uses_one_process_and_publishes_each_output(
