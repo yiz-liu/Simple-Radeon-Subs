@@ -11,10 +11,12 @@ from src.logger import logger
 DUPLICATE_MERGE_GAP_MS: Final = 250
 EXCESSIVE_REPETITION_LENGTH: Final = 4
 PHRASE_LOOP_TEXT_LENGTH: Final = 32
+PRESERVED_REPETITION_COUNT: Final = 3
 MAX_SUBTITLE_DURATION_MS: Final = 5_000
 SHORTENED_SUBTITLE_DURATION_MS: Final = 2_000
 NON_WORD_PATTERN: Final = re.compile(r"[^\w]", flags=re.UNICODE)
 PHRASE_LOOP_PATTERN: Final = re.compile(r"(.{2,8})\1{3,}")
+PATHOLOGICAL_REPETITION_PATTERN: Final = re.compile(r"(.{1,8}?)\1{3,}")
 
 
 @final
@@ -126,6 +128,10 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
         text = clean_text(subtitle.text)
         if is_garbage(text) or is_excessive_repetition(text):
             continue
+        text = PATHOLOGICAL_REPETITION_PATTERN.sub(
+            lambda match: match.group(1) * PRESERVED_REPETITION_COUNT,
+            text,
+        )
         normalized.append(
             pysrt.SubRipItem(
                 index=subtitle.index,

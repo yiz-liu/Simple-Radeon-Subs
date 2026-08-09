@@ -97,9 +97,9 @@ def test_clean_srt_recovers_invalid_utf8(tmp_path: Path) -> None:
     output_path = tmp_path / "output.srt"
     input_path.write_bytes(
         b"1\n00:00:00,000 --> 00:00:01,000\n"
-        + "前".encode()
+        + b"before"
         + b"\xe3\x81"
-        + "後\n".encode()
+        + b"after\n"
     )
 
     # When: The cleaner reads the malformed native output.
@@ -107,28 +107,49 @@ def test_clean_srt_recovers_invalid_utf8(tmp_path: Path) -> None:
 
     # Then: Surrounding text is preserved in a valid UTF-8 SRT.
     cleaned = pysrt.open(str(output_path), encoding="utf-8")
-    assert [item.text for item in cleaned] == ["前�後"]
+    assert [item.text for item in cleaned] == ["before�after"]
 
 
 def test_clean_srt_removes_only_qualifying_phrase_loops(tmp_path: Path) -> None:
     # Given: Phrase loops around the text-length, phrase-length, and repeat boundaries.
     items = [
-        _subtitle(1, (0, 1_000), "走吧！" * 16),
+        _subtitle(1, (0, 1_000), "go!" * 16),
         _subtitle(2, (1_000, 2_000), "abcdefgh" * 4),
         _subtitle(3, (2_000, 3_000), "abcdefghi" * 4),
         _subtitle(4, (3_000, 4_000), "abcdefgh" * 3 + "ijklmnop"),
-        _subtitle(5, (4_000, 5_000), "走吧！" * 15),
+        _subtitle(5, (4_000, 5_000), "go!" * 15),
     ]
 
     # When: The conservative cleaner processes them.
     cleaned = _clean(tmp_path, items)
 
-    # Then: Only effective text of at least 32 characters with a 2-8 character
-    # phrase repeated four times is removed.
+    # Then: Only the qualifying 32-character loop is removed; the shorter loop
+    # crosses the normalization boundary and retains three repetitions.
     assert [item.text for item in cleaned] == [
         "abcdefghi" * 4,
         "abcdefgh" * 3 + "ijklmnop",
-        "走吧！" * 15,
+        "go!" * 3,
+    ]
+
+
+def test_clean_srt_normalizes_only_pathological_repetition(tmp_path: Path) -> None:
+    # Given: Character and phrase runs on both sides of the repetition boundary.
+    items = [
+        _subtitle(1, (0, 1_000), "Wow" + "!" * 4),
+        _subtitle(2, (2_000, 3_000), "very " * 4 + "nice."),
+        _subtitle(3, (4_000, 5_000), "Wow" + "!" * 3),
+        _subtitle(4, (6_000, 7_000), "very " * 3 + "nice."),
+    ]
+
+    # When: The conservative cleaner processes the native output.
+    cleaned = _clean(tmp_path, items)
+
+    # Then: More than three repeats collapse to three; shorter emphasis is unchanged.
+    assert [item.text for item in cleaned] == [
+        "Wow" + "!" * 3,
+        "very " * 3 + "nice.",
+        "Wow" + "!" * 3,
+        "very " * 3 + "nice.",
     ]
 
 
