@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from tqdm import tqdm
+
 from src.audio import AudioExtractor
 from src.clean import clean_srt
 from src.logger import logger
@@ -144,12 +146,25 @@ def run_pipeline(
     ]
     if extraction_jobs:
         extractor = AudioExtractor()
-        for job in extraction_jobs:
-            try:
-                job.audio_path.parent.mkdir(parents=True, exist_ok=True)
-                _ = extractor.extract(job.input_path, job.audio_path, force=True)
-            except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
-                failures[job.input_path] = JobFailure(job, "extract", str(error))
+        with tqdm(
+            total=len(extraction_jobs),
+            desc="Extracting audio",
+            unit="file",
+            position=0,
+        ) as extraction_progress:
+            for job in extraction_jobs:
+                try:
+                    job.audio_path.parent.mkdir(parents=True, exist_ok=True)
+                    _ = extractor.extract(
+                        job.input_path,
+                        job.audio_path,
+                        force=True,
+                        progress_position=1,
+                    )
+                except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
+                    failures[job.input_path] = JobFailure(job, "extract", str(error))
+                finally:
+                    extraction_progress.update()
 
     transcription_jobs = [
         job

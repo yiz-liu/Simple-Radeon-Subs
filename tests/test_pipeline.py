@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pysrt
 import pytest
@@ -33,6 +34,9 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     first.write_bytes(b"first-source")
     second.write_bytes(b"second-source")
     events: list[str] = []
+    extraction_progress = MagicMock()
+    extraction_progress.__enter__.return_value = extraction_progress
+    progress_factory = MagicMock(return_value=extraction_progress)
 
     class FakeExtractor:
         def extract(
@@ -40,9 +44,11 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
             input_path: str | Path,
             output_path: str | Path | None = None,
             force: bool = False,
+            progress_position: int | None = None,
         ) -> Path:
             source = Path(input_path)
             destination = Path(output_path or source.with_suffix(".wav"))
+            assert progress_position == 1
             events.append(f"extract:{source.name}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(b"audio")
@@ -70,6 +76,7 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     monkeypatch.setattr(pipeline_module, "Transcriber", FakeTranscriber)
     monkeypatch.setattr(pipeline_module, "VLLMTranslator", FakeTranslator)
     monkeypatch.setattr(pipeline_module, "clean_srt", fake_clean)
+    monkeypatch.setattr(pipeline_module, "tqdm", progress_factory)
     options = PipelineOptions(
         target_lang="Chinese",
         src_lang="en",
@@ -99,6 +106,13 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
         f"clean:.second.mp3.simple-radeon-subs:{enable_vad}",
     ]
     assert events[5] == "translate:2"
+    progress_factory.assert_called_once_with(
+        total=2,
+        desc="Extracting audio",
+        unit="file",
+        position=0,
+    )
+    assert extraction_progress.update.call_count == 2
     assert first.read_bytes() == b"first-source"
     assert second.read_bytes() == b"second-source"
 
@@ -119,7 +133,9 @@ def test_pipeline_isolates_failed_extraction_and_reports_failure(
             input_path: str | Path,
             output_path: str | Path | None = None,
             force: bool = False,
+            progress_position: int | None = None,
         ) -> Path:
+            assert progress_position == 1
             source = Path(input_path)
             if source == broken:
                 raise OSError("broken fixture")
@@ -186,7 +202,9 @@ def test_pipeline_creates_sidecar_before_starting_extraction(
             input_path: str | Path,
             output_path: str | Path | None = None,
             force: bool = False,
+            progress_position: int | None = None,
         ) -> Path:
+            assert progress_position == 1
             destination = Path(output_path or Path(input_path).with_suffix(".wav"))
             parent_states.append(destination.parent.is_dir())
             raise OSError("stop after observing the extraction boundary")
@@ -256,7 +274,9 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
             input_path: str | Path,
             output_path: str | Path | None = None,
             force: bool = False,
+            progress_position: int | None = None,
         ) -> Path:
+            assert progress_position == 1
             destination = Path(output_path or Path(input_path).with_suffix(".wav"))
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(b"audio")

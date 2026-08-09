@@ -78,6 +78,7 @@ class AudioExtractor:
         input_path: str | Path,
         output_path: Optional[str | Path] = None,
         force: bool = False,
+        progress_position: int | None = None,
     ) -> Path:
         """
         Extracts audio from the input video/audio file with a progress bar.
@@ -100,7 +101,8 @@ class AudioExtractor:
             return output_file
 
         duration = self.get_duration(input_file)
-        logger.info("Extracting optimized audio: %s", input_file.name)
+        if progress_position is None:
+            logger.info("Extracting optimized audio: %s", input_file.name)
 
         # Construct FFmpeg command
         cmd = [
@@ -135,8 +137,14 @@ class AudioExtractor:
         ) as process:
             with tqdm(
                 total=progress_total,
-                desc="Processing audio",
+                desc=(
+                    "Processing audio"
+                    if progress_position is None
+                    else f"Current file: {input_file.name}"
+                ),
                 unit="s",
+                position=progress_position or 0,
+                leave=progress_position is None,
             ) as pbar:
                 last_time = 0.0
                 if process.stdout is not None:

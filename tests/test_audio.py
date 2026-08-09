@@ -1,6 +1,7 @@
 import wave
 from pathlib import Path
 from typing import Final
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,3 +64,30 @@ def test_extract_converts_example_video_to_whisper_wav(tmp_path: Path) -> None:
             audio.getsampwidth(),
         ) == (AUDIO_SAMPLE_RATE, AUDIO_CHANNELS, 2)
         assert audio.getnframes() > 0
+
+
+def test_extract_uses_a_reusable_nested_progress_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: A batch caller reserves the second terminal line for the current file.
+    progress = MagicMock()
+    progress.__enter__.return_value = progress
+    progress_factory = MagicMock(return_value=progress)
+    monkeypatch.setattr("src.audio.tqdm", progress_factory)
+    output_path = tmp_path / "example.wav"
+
+    # When: The extractor processes a file within that batch display.
+    _ = AudioExtractor().extract(
+        EXAMPLE_VIDEO,
+        output_path,
+        progress_position=1,
+    )
+
+    # Then: The current-file bar occupies and clears the reusable second line.
+    progress_factory.assert_called_once()
+    progress_options = progress_factory.call_args.kwargs
+    assert progress_options["desc"] == f"Current file: {EXAMPLE_VIDEO.name}"
+    assert progress_options["unit"] == "s"
+    assert progress_options["position"] == 1
+    assert progress_options["leave"] is False
