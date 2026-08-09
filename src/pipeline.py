@@ -188,7 +188,11 @@ def run_pipeline(
     ]
     for job in cleaning_jobs:
         try:
-            clean_srt(job.raw_srt_path, job.cleaned_srt_path)
+            clean_srt(
+                job.raw_srt_path,
+                job.cleaned_srt_path,
+                enable_vad=options.enable_vad,
+            )
         except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
             failures[job.input_path] = JobFailure(job, "clean", str(error))
 

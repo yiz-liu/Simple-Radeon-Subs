@@ -21,9 +21,11 @@ def _write_srt(path: Path, text: str) -> None:
     ).save(str(path), encoding="utf-8")
 
 
+@pytest.mark.parametrize("enable_vad", (False, True))
 def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    enable_vad: bool,
 ) -> None:
     # Given: Two source files and lightweight adapters recording stage order.
     first = tmp_path / "first.wav"
@@ -60,8 +62,8 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
                 _write_srt(task.output_path, task.input_path.stem)
             return []
 
-    def fake_clean(input_path: Path, output_path: Path | None = None) -> None:
-        events.append(f"clean:{input_path.parent.parent.name}")
+    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
+        events.append(f"clean:{input_path.parent.parent.name}:{enable_vad}")
         _write_srt(output_path or input_path, input_path.stem)
 
     monkeypatch.setattr(pipeline_module, "AudioExtractor", FakeExtractor)
@@ -74,7 +76,7 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
         keep_temp=True,
         force=True,
         translated_only=True,
-        enable_vad=True,
+        enable_vad=enable_vad,
     )
     jobs = build_jobs(
         PipelinePlan(
@@ -91,10 +93,10 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     # Then: Stages are global, heavyweight adapters run once, and sources survive.
     assert result.failures == ()
     assert events[:2] == ["extract:first.wav", "extract:second.mp3"]
-    assert events[2] == "transcribe:2:True"
+    assert events[2] == f"transcribe:2:{enable_vad}"
     assert events[3:5] == [
-        "clean:.first.wav.simple-radeon-subs",
-        "clean:.second.mp3.simple-radeon-subs",
+        f"clean:.first.wav.simple-radeon-subs:{enable_vad}",
+        f"clean:.second.mp3.simple-radeon-subs:{enable_vad}",
     ]
     assert events[5] == "translate:2"
     assert first.read_bytes() == b"first-source"
@@ -145,7 +147,7 @@ def test_pipeline_isolates_failed_extraction_and_reports_failure(
     monkeypatch.setattr(pipeline_module, "Transcriber", FakeTranscriber)
     monkeypatch.setattr(pipeline_module, "VLLMTranslator", FakeTranslator)
 
-    def fake_clean(input_path: Path, output_path: Path | None = None) -> None:
+    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
         _write_srt(output_path or input_path, "cleaned")
 
     monkeypatch.setattr(pipeline_module, "clean_srt", fake_clean)
@@ -272,7 +274,7 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
                 _write_srt(task.output_path, "translated")
             return []
 
-    def fake_clean(input_path: Path, output_path: Path | None = None) -> None:
+    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
         _write_srt(output_path or input_path, "cleaned")
 
     monkeypatch.setattr(pipeline_module, "AudioExtractor", FakeExtractor)

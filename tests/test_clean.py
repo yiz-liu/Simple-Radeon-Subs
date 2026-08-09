@@ -23,11 +23,12 @@ def _subtitle(
 def _clean(
     tmp_path: Path,
     items: list[pysrt.SubRipItem],
+    enable_vad: bool = True,
 ) -> pysrt.SubRipFile:
     input_path = tmp_path / "input.srt"
     output_path = tmp_path / "output.srt"
     pysrt.SubRipFile(items=items).save(str(input_path), encoding="utf-8")
-    clean_srt(input_path, output_path)
+    clean_srt(input_path, output_path, enable_vad=enable_vad)
     return pysrt.open(str(output_path), encoding="utf-8")
 
 
@@ -45,31 +46,32 @@ def test_clean_srt_preserves_meaningful_text_and_markup(
 
     # Then: Content is preserved while long cue timestamps keep only their endings.
     assert [(item.text, item.start.ordinal, item.end.ordinal) for item in cleaned] == [
-        ("I", 8_000, 10_000),
-        ("<i>Stay</i> [aside] ♪", 48_000, 50_000),
+        ("I", 2_000, 10_000),
+        ("<i>Stay</i> [aside] ♪", 42_000, 50_000),
     ]
 
 
 @pytest.mark.parametrize(
-    ("span_ms", "expected_span_ms"),
+    ("enable_vad", "span_ms", "expected_span_ms"),
     (
-        ((1_000, 6_000), (1_000, 6_000)),
-        ((1_000, 6_001), (4_001, 6_001)),
+        (True, (1_000, 9_000), (1_000, 9_000)),
+        (True, (1_000, 9_001), (1_001, 9_001)),
+        (False, (1_000, 9_001), (1_000, 9_001)),
     ),
 )
-def test_clean_srt_keeps_only_the_final_two_seconds_when_duration_exceeds_five(
+def test_clean_srt_applies_the_long_cue_workaround_only_with_vad(
     tmp_path: Path,
+    enable_vad: bool,
     span_ms: tuple[int, int],
     expected_span_ms: tuple[int, int],
 ) -> None:
-    # Given: A cue at or immediately beyond the five-second boundary.
+    # Given: A cue at the duration boundary under one explicit VAD mode.
     items = [_subtitle(1, span_ms, "Keep the ending")]
 
-    # When: The cleaner normalizes its timeline.
-    cleaned = _clean(tmp_path, items)
+    # When: The cleaner normalizes its timeline for that transcription mode.
+    cleaned = _clean(tmp_path, items, enable_vad=enable_vad)
 
-    # Then: Only a duration over five seconds moves the start to two seconds
-    # before the unchanged end.
+    # Then: Only VAD-derived cues over eight seconds keep their final eight seconds.
     assert (cleaned[0].start.ordinal, cleaned[0].end.ordinal) == expected_span_ms
 
 

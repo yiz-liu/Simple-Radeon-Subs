@@ -12,8 +12,8 @@ DUPLICATE_MERGE_GAP_MS: Final = 250
 EXCESSIVE_REPETITION_LENGTH: Final = 4
 PHRASE_LOOP_TEXT_LENGTH: Final = 32
 PRESERVED_REPETITION_COUNT: Final = 3
-MAX_SUBTITLE_DURATION_MS: Final = 5_000
-SHORTENED_SUBTITLE_DURATION_MS: Final = 2_000
+MAX_SUBTITLE_DURATION_MS: Final = 8_000
+SHORTENED_SUBTITLE_DURATION_MS: Final = 8_000
 NON_WORD_PATTERN: Final = re.compile(r"[^\w]", flags=re.UNICODE)
 PHRASE_LOOP_PATTERN: Final = re.compile(r"(.{2,8})\1{3,}")
 PATHOLOGICAL_REPETITION_PATTERN: Final = re.compile(r"(.{1,8}?)\1{3,}")
@@ -101,7 +101,11 @@ def filter_consecutive_duplicates(
     return filtered
 
 
-def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
+def clean_srt(
+    file_path: Path,
+    output_path: Path | None = None,
+    enable_vad: bool = True,
+) -> None:
     """Conservatively normalize an SRT while preserving uncertain content."""
     input_file = file_path.resolve()
     output_file = output_path.resolve() if output_path is not None else input_file
@@ -149,7 +153,11 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
         if subtitle.end.ordinal == subtitle.start.ordinal:
             zero_duration_count += 1
             continue
-        if subtitle.end.ordinal - subtitle.start.ordinal > MAX_SUBTITLE_DURATION_MS:
+        if (
+            enable_vad
+            and subtitle.end.ordinal - subtitle.start.ordinal
+            > MAX_SUBTITLE_DURATION_MS
+        ):
             subtitle.start = pysrt.SubRipTime(
                 milliseconds=subtitle.end.ordinal - SHORTENED_SUBTITLE_DURATION_MS
             )
@@ -184,6 +192,7 @@ def clean_srt(file_path: Path, output_path: Path | None = None) -> None:
 class _Arguments(argparse.Namespace):
     input: str = ""
     output: str | None = None
+    enable_vad: bool = True
 
 
 def main() -> int:
@@ -196,12 +205,18 @@ def main() -> int:
         "--output",
         help="Path to the output SRT file (defaults to in-place).",
     )
+    _ = parser.add_argument(
+        "--disable-vad",
+        action="store_false",
+        dest="enable_vad",
+        help="Preserve long cue timestamps for subtitles produced without VAD.",
+    )
     arguments = parser.parse_args(namespace=_Arguments())
     input_path = Path(arguments.input).resolve()
     output_path = Path(arguments.output).resolve() if arguments.output else None
 
     try:
-        clean_srt(input_path, output_path)
+        clean_srt(input_path, output_path, enable_vad=arguments.enable_vad)
     except (OSError, UnicodeError, pysrt.Error, InvalidSubtitleTimelineError) as error:
         logger.error("Subtitle cleaning failed: %s", error)
         return 1

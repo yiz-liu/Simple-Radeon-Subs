@@ -193,7 +193,7 @@ class WhisperBatchRunner:
                 str(self.runtime.vad_model_path),
                 "--vad",
                 "--vad-threshold",
-                "0.05",
+                "0.01",
                 "--vad-min-speech-duration-ms",
                 "100",
                 "--vad-min-silence-duration-ms",

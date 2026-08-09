@@ -160,7 +160,7 @@ def test_transcribe_uses_the_best_tested_vad_profile_by_default(
     arguments = _recorded_arguments(fake_runtime)
     assert arguments[arguments.index("--max-context") + 1] == "48"
     assert arguments[arguments.index("--vad-model") + 1] == str(fake_runtime.vad_model)
-    assert arguments[arguments.index("--vad-threshold") + 1] == "0.05"
+    assert arguments[arguments.index("--vad-threshold") + 1] == "0.01"
     assert arguments[arguments.index("--vad-min-speech-duration-ms") + 1] == "100"
     assert arguments[arguments.index("--vad-min-silence-duration-ms") + 1] == "120"
     assert arguments[arguments.index("--vad-max-speech-duration-s") + 1] == "10"
