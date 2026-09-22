@@ -8,9 +8,8 @@ The pipeline is:
 video -> FFmpeg audio extraction -> ASR -> subtitle cleanup -> translation
 ```
 
-The integrated ASR backend is whisper.cpp built with HIP. Its built-in Silero
-VAD uses the fixed tested profile by default; the standalone Python Silero stage
-has been removed.
+The ASR backend is whisper.cpp built with HIP. Its built-in Silero VAD uses
+a fixed profile by default.
 
 ## Requirements
 
@@ -20,8 +19,8 @@ has been removed.
 - system ROCm with `hipcc` and `rocminfo`
 - Git and CMake for the managed whisper.cpp build
 
-The verified target is WSL2 with an AMD Radeon RX 9070 XT (`gfx1201`), system
-ROCm 7.2.4, and the vLLM 0.25.1 `rocm723` wheel stack. Other compatible AMD
+The target environment is WSL2 with an AMD Radeon RX 9070 XT (`gfx1201`), system
+ROCm 7.2.4, and the vLLM 0.27.1 `rocm723` wheel stack. Other compatible AMD
 GPUs may work but are not part of the current tested baseline.
 
 Install FFmpeg on Ubuntu or WSL:
@@ -33,8 +32,6 @@ ffmpeg -version
 ffprobe -version
 ```
 
-The project does not download or bundle FFmpeg.
-
 ## Environment Setup
 
 Clone the repository and install the project Python version:
@@ -45,16 +42,9 @@ cd Simple-Radeon-Subs
 uv python install 3.12
 ```
 
-When creating the lock file for the first time, or after editing dependency
-declarations directly, run:
-
-```bash
-uv lock --managed-python
-```
-
 The Tsinghua mirror is the default package index, while vLLM is explicitly
-sourced from its ROCm wheel index. The committed lock intentionally records
-those sources; normal `--locked` syncs do not need command-line index overrides.
+sourced from its ROCm wheel index. `uv.lock` records the package versions and
+sources used by the installation commands below.
 
 Create the base environment from the committed lock file:
 
@@ -62,7 +52,8 @@ Create the base environment from the committed lock file:
 uv sync --locked --managed-python
 ```
 
-This creates `.venv` with uv-managed Python 3.12. Activating it is optional:
+This creates `.venv` with uv-managed Python 3.12. Activate it before running
+repository commands:
 
 ```bash
 source .venv/bin/activate
@@ -71,8 +62,8 @@ source .venv/bin/activate
 Verify the base environment and system tools:
 
 ```bash
-uv run --managed-python python --version
-uv run --managed-python python -c "import tqdm; print('base environment OK')"
+python --version
+python -c "import tqdm; print('base environment OK')"
 ffmpeg -version
 ffprobe -version
 ```
@@ -82,25 +73,85 @@ Prepare the full ROCm environment and the managed ASR runtime:
 ```bash
 uv sync --locked --managed-python --group vllm
 source .venv/bin/activate
-./scripts/patch_vllm.sh
+.venv/bin/python scripts/patch_vllm.py
 ./scripts/install_whisper_cli.sh
 ./scripts/download_weights.sh
 ./scripts/doctor.sh
 ```
 
-`uv sync` installs the locked Python dependencies. The scripts separately patch
-the supported vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
+Run the minimal vLLM translation smoke test with the managed model profile:
+
+```bash
+python scripts/basic_translation.py
+```
+
+`uv sync` installs the locked Python dependencies. The scripts verify the
+official vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
 targets reported by `rocminfo`, and download verified weights. The doctor checks
 the system tools, Python GPU stack, whisper-cli, and ASR assets; the download
-script verifies the translation model. uv does not compile whisper.cpp or own
-model weights. See [DEVLOG.md](DEVLOG.md) for the environment design history.
+script verifies the translation model.
+
+`scripts/basic_translation.py` sends one batch of four translation requests.
+Each request contains three French subtitle lines from a public-domain classic
+and returns structured Chinese translations.
+
+## Upgrading vLLM
+
+Choose a release with an official ROCm wheel compatible with the system ROCm,
+Python, and GPU. Check the [vLLM releases](https://github.com/vllm-project/vllm/releases)
+for the release's ROCm index URL.
+
+Update these values together (the examples show the current version):
+
+| File | Setting | Current value |
+| --- | --- | --- |
+| `pyproject.toml` | `vllm` entry under `[dependency-groups]` | `vllm==0.27.1` |
+| `pyproject.toml` | URL of the `vllm-rocm` index | `https://wheels.vllm.ai/rocm/0.27.1/rocm723` |
+| `scripts/patch_vllm.py` | `EXPECTED_VERSION` | `0.27.1+rocm723` |
+
+Use the full installed wheel version for `EXPECTED_VERSION`, including the
+ROCm suffix. From the repository root, regenerate the lock and install its
+complete runtime and development dependencies:
+
+```bash
+source .venv/bin/activate
+uv lock --managed-python
+uv sync --locked --managed-python --group dev --group vllm
+```
+
+Verify the installed version, GPU runtime, translation, and project tests:
+
+```bash
+python -c "from importlib.metadata import version; print(version('vllm'))"
+.venv/bin/python scripts/patch_vllm.py
+./scripts/doctor.sh
+python scripts/basic_translation.py
+pytest
+ruff check .
+```
+
+The demo loads the managed translation model and prints a generated response.
+After validation, update the version in this README and record the package
+versions and test results in `DEVLOG.md`. Commit the version declarations,
+`uv.lock`, script, and documentation together. Generate `uv.lock` with uv rather
+than editing package entries by hand.
+
+To install an upgrade already recorded in the repository, run:
+
+```bash
+source .venv/bin/activate
+uv sync --locked --managed-python --group dev --group vllm
+.venv/bin/python scripts/patch_vllm.py
+./scripts/doctor.sh
+python scripts/basic_translation.py
+```
 
 ## Audio Extraction
 
 The base environment is sufficient to exercise FFmpeg audio extraction:
 
 ```bash
-uv run --managed-python python -m src.audio /path/to/video.mkv -o output.wav
+python -m src.audio /path/to/video.mkv -o output.wav
 ```
 
 The output is 16 kHz, mono, 16-bit PCM WAV for downstream ASR processing.
@@ -255,10 +306,7 @@ This is tracked upstream in
 
 As a local workaround, subtitle cleanup shortens every VAD-derived cue longer
 than eight seconds to its final eight seconds while preserving the original end
-timestamp. The `--disable-vad` pipeline mode skips this workaround. When
-upstream fixes segment-level SRT mapping, update the pinned
-`WHISPER_CPP_COMMIT`, verify it against the ASR fixture and a representative
-long recording, then reassess this cleanup rule and update this note.
+timestamp. Use `--disable-vad` to preserve long cue timestamps.
 
 ### whisper.cpp invalid UTF-8
 
@@ -267,21 +315,7 @@ and write invalid UTF-8. This remains open upstream in
 [#3760](https://github.com/ggml-org/whisper.cpp/issues/3760).
 
 The cleanup boundary decodes malformed input with replacement, logs the byte
-position, and continues with conservative filtering. Remove this workaround only
-after the pinned whisper.cpp build consistently emits valid segment-level SRT.
-
-### vLLM ROCm detection under WSL
-
-The pinned `vllm==0.25.1+rocm723` wheel cannot reliably detect ROCm when WSL
-blocks AMD SMI access. Its early `warning_once` calls can also enter vLLM's
-distributed modules while platform initialization is incomplete, causing a
-circular import. Upstream work is tracked in
-[#38434](https://github.com/vllm-project/vllm/pull/38434).
-
-`scripts/patch_vllm.sh` applies the version- and checksum-guarded workaround
-after `uv sync`. Once an official compatible wheel imports successfully under
-WSL and `scripts/doctor.sh` passes without that workaround, update the vLLM
-dependency and lock file, remove the patch script, and remove its setup step.
+position, and continues with conservative filtering.
 
 ## Development
 
@@ -289,7 +323,7 @@ Development tools are declared in the `dev` group and are not installed by the
 default sync. Create a development environment with:
 
 ```bash
-uv sync --locked --managed-python --group dev
+uv sync --locked --managed-python --group dev --group vllm
 source .venv/bin/activate
 ```
 

@@ -42,7 +42,7 @@ Dependency ownership is explicit:
 Prepare the complete native runtime with:
 
 ```bash
-./scripts/patch_vllm.sh
+./.venv/bin/python scripts/patch_vllm.py
 ./scripts/install_whisper_cli.sh
 ./scripts/download_weights.sh
 ./scripts/doctor.sh

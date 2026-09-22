@@ -16,7 +16,7 @@ dev = [
     "ruff>=0.12.0",
 ]
 vllm = [
-    "vllm==0.25.1",
+    "vllm==0.27.1",
 ]
 
 [tool.uv]
@@ -27,7 +27,7 @@ package = false
 
 [[tool.uv.index]]
 name = "vllm-rocm"
-url = "https://wheels.vllm.ai/rocm/0.25.1/rocm723"
+url = "https://wheels.vllm.ai/rocm/0.27.1/rocm723"
 
 [[tool.uv.index]]
 name = "tuna"

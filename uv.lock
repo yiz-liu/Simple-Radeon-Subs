@@ -70,8 +70,8 @@ wheels = [
 
 [[package]]
 name = "amd-aiter"
-version = "0.1.16.post2"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+version = "0.1.19"
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "einops" },
     { name = "flydsl" },
@@ -82,7 +82,7 @@ dependencies = [
     { name = "pybind11" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/amd_aiter-0.1.16.post2-cp312-cp312-manylinux_2_34_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/amd_aiter-0.1.19-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]
@@ -115,9 +115,9 @@ wheels = [
 [[package]]
 name = "amdsmi"
 version = "26.2.2+c2d9476115"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/amdsmi-26.2.2%2Bc2d9476115-py3-none-any.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/amdsmi-26.2.2%2Bc2d9476115-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -475,15 +475,6 @@ wheels = [
 ]
 
 [[package]]
-name = "diskcache"
-version = "5.6.3"
-source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3f/21/1c1ffc1a039ddcc459db43cc108658f32c57d271d7289a2794e401d0fdb6/diskcache-5.6.3.tar.gz", hash = "sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc" }
-wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3f/27/4570e78fc0bf5ea0ca45eb1de3818a23787af9b390c0b0a0033a1b8236f9/diskcache-5.6.3-py3-none-any.whl", hash = "sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19" },
-]
-
-[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -657,21 +648,21 @@ wheels = [
 [[package]]
 name = "flash-attn"
 version = "2.8.3"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "einops" },
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/flash_attn-2.8.3-cp312-cp312-manylinux_2_34_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/flash_attn-2.8.3-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]
 name = "flydsl"
-version = "0.2.0"
+version = "0.2.4"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/63/c0/eb8e12eb9a3eeb3c5fb6e47eebda23b34f3f3a70219089b2098c65b7d5ac/flydsl-0.2.0-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:e861e2a3fe56f6d6889199f421c4d843ae80a26a073bc71867cbd3c433cf4d3a", size = 72899806, upload-time = "2026-06-04T02:13:22.632Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ac/d5/d12192c33e60c0c124be503ca9174212ac0c29b222e2098b77d8ce5e61d8/flydsl-0.2.4-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:3ba78e6c1cec37c99b83d71a34c1ed50f1058231bcab1a352a1b431082fb2c4f", size = 72989209, upload-time = "2026-07-12T13:40:38.129Z" },
 ]
 
 [[package]]
@@ -895,7 +886,7 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.24.0"
+version = "1.32.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "click" },
@@ -908,9 +899,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/df/9b/d3bb4e7d792835daf34dd7091bbc7d7b4e0437d9388f1ea7239cce49f478/huggingface_hub-1.24.0.tar.gz", hash = "sha256:18431ff4daae0749aa9ba102fc952e314c98e1d30ebdec5319d85ca0a83e1ae5", size = 921848, upload-time = "2026-07-17T09:54:01.022Z" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fe/0f/e83fdd856da8fca26bf78d71709ebd120432a0ce535e72b9597cab1eb5bf/huggingface_hub-1.32.0.tar.gz", hash = "sha256:ed70a45498abe86039df7c2f4e5f7575de524be908d3840e8f828d5525eafd6a", size = 1038662, upload-time = "2026-09-17T10:27:48.049Z" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/5f/c3/aeaaf3911d2529614be18d1c8b5496afc185560e76568063d517283318af/huggingface_hub-1.24.0-py3-none-any.whl", hash = "sha256:6ed4120a84a6beec900640aa7e346bd766a6b7341e41526fef5dc8bd81fb7d59", size = 771904, upload-time = "2026-07-17T09:53:59.106Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/1b/cf/d98dd561d6d0d7b7d7a64d1563f8aaaa7c235daee41c1c9bcc3da62420ed/huggingface_hub-1.32.0-py3-none-any.whl", hash = "sha256:b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8", size = 842906, upload-time = "2026-09-17T10:27:46.102Z" },
 ]
 
 [[package]]
@@ -2336,7 +2327,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "ruff", specifier = ">=0.12.0" },
 ]
-vllm = [{ name = "vllm", specifier = "==0.25.1", index = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }]
+vllm = [{ name = "vllm", specifier = "==0.27.1", index = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }]
 
 [[package]]
 name = "six"
@@ -2489,7 +2480,7 @@ wheels = [
 [[package]]
 name = "torch"
 version = "2.11.0+gitd0c8b1f"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
@@ -2500,7 +2491,7 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/torch-2.11.0%2Bgitd0c8b1f-cp312-cp312-manylinux_2_35_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/torch-2.11.0%2Bgitd0c8b1f-cp312-cp312-manylinux_2_35_x86_64.whl" },
 ]
 
 [[package]]
@@ -2518,25 +2509,25 @@ wheels = [
 [[package]]
 name = "torchaudio"
 version = "2.9.0+eaa9e4e"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/torchaudio-2.9.0%2Beaa9e4e-cp312-cp312-manylinux_2_34_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/torchaudio-2.9.0%2Beaa9e4e-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]
 name = "torchvision"
 version = "0.24.1+d801a34"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/torchvision-0.24.1%2Bd801a34-cp312-cp312-manylinux_2_34_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/torchvision-0.24.1%2Bd801a34-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]
@@ -2571,21 +2562,9 @@ wheels = [
 [[package]]
 name = "triton"
 version = "3.6.0"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/triton-3.6.0-cp312-cp312-manylinux_2_35_x86_64.whl" },
-]
-
-[[package]]
-name = "triton-kernels"
-version = "1.0.0"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pytest" },
-]
-wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/triton_kernels-1.0.0-py3-none-any.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/triton-3.6.0-cp312-cp312-manylinux_2_35_x86_64.whl" },
 ]
 
 [[package]]
@@ -2679,8 +2658,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.25.1+rocm723"
-source = { registry = "https://wheels.vllm.ai/rocm/0.25.1/rocm723" }
+version = "0.27.1+rocm723"
+source = { registry = "https://wheels.vllm.ai/rocm/0.27.1/rocm723" }
 dependencies = [
     { name = "aiohttp" },
     { name = "amd-aiter" },
@@ -2696,7 +2675,6 @@ dependencies = [
     { name = "conch-triton-kernels" },
     { name = "datasets" },
     { name = "depyf" },
-    { name = "diskcache" },
     { name = "einops" },
     { name = "fastapi", extra = ["standard"] },
     { name = "fastsafetensors" },
@@ -2761,13 +2739,12 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
     { name = "triton" },
-    { name = "triton-kernels" },
     { name = "typing-extensions" },
     { name = "watchfiles" },
     { name = "xgrammar" },
 ]
 wheels = [
-    { url = "https://wheels.vllm.ai/rocm/752a3a504485790a2e8491cacbb35c137339ad34/vllm-0.25.1%2Brocm723-cp312-cp312-manylinux_2_34_x86_64.whl" },
+    { url = "https://wheels.vllm.ai/rocm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm-0.27.1%2Brocm723-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]

@@ -96,14 +96,14 @@ native tools.
 ### Python package resolution
 
 Building vLLM from source was considered when no ROCm 7.2.4 wheel was apparent.
-The vLLM wheel index instead provided a coordinated `rocm723` stack for vLLM
-0.25.1, including PyTorch, Triton, AITER, and compiled ROCm extensions. Reusing
-that stack was more reproducible than rebuilding the same dependency graph.
+The vLLM wheel index provides a coordinated `rocm723` stack for vLLM 0.27.1,
+including PyTorch, Triton, AITER, and compiled ROCm extensions. Reusing that
+stack was more reproducible than rebuilding the same dependency graph.
 
 `pyproject.toml` uses the Tsinghua mirror as the default index and binds vLLM to:
 
 ```text
-https://wheels.vllm.ai/rocm/0.25.1/rocm723
+https://wheels.vllm.ai/rocm/0.27.1/rocm723
 ```
 
 uv uses `first-index`, and the committed lock records both sources. A locked
@@ -113,7 +113,7 @@ vLLM from a general-purpose index.
 The verified packages are:
 
 ```text
-vLLM: 0.25.1+rocm723
+vLLM: 0.27.1+rocm723
 PyTorch: 2.11.0+gitd0c8b1f
 Triton: 3.6.0
 Torch HIP runtime: 7.2.53211
@@ -132,14 +132,12 @@ SMI path used by parts of vLLM platform discovery. Two failures were observed:
 2. Early `warning_once` calls could import distributed state while platform
    initialization was incomplete, causing a circular import.
 
-`scripts/patch_vllm.sh` applies the local workaround. It accepts only
-`0.25.1+rocm723`, validates original or already-patched file hashes, modifies the
-known files, compiles them, and runs a GPU import smoke test. Unexpected wheel
-contents fail rather than receiving a best-effort patch.
+The vLLM check and WSL fallback are now implemented by
+`scripts/patch_vllm.py`; it verifies the installed `0.27.1+rocm723` wheel and
+runs the GPU import smoke test before applying any modification.
 
-The workaround is tied to upstream vLLM work in
-[#38434](https://github.com/vllm-project/vllm/pull/38434) and should be removed
-after a compatible wheel passes the repository checks without it.
+The WSL fallback is provided upstream by
+[#38434](https://github.com/vllm-project/vllm/pull/38434).
 
 ### Managed whisper.cpp build
 
@@ -195,7 +193,7 @@ The environment can be reproduced with:
 uv python install 3.12
 uv sync --locked --managed-python --group dev --group vllm
 source .venv/bin/activate
-./scripts/patch_vllm.sh
+.venv/bin/python scripts/patch_vllm.py
 ./scripts/install_whisper_cli.sh
 ./scripts/download_weights.sh
 ./scripts/doctor.sh
@@ -208,3 +206,15 @@ verifies the translation model.
 
 At this point each environment component had one owner and a reproducible
 verification path. This completed the environment-preparation phase.
+
+## 2026-09-22: v0.27.1 WSL ROCm patch check
+
+The managed vLLM profile is now pinned to `0.27.1+rocm723` with Torch 2.11.
+`scripts/patch_vllm.py` checks the installed runtime first and exits without
+modifying vLLM when it already selects `RocmPlatform`. If AMD SMI detection
+fails under WSL, it applies the v0.27.1 fallback and rechecks the platform and
+device name. `scripts/patch_vllm.py` is the check-first ROCm patch entry point.
+
+The translation smoke test is now `scripts/basic_translation.py`. It submits
+four requests in one vLLM batch, with three French subtitle lines from classic
+works in each request, and prints the four structured translation responses.
