@@ -314,3 +314,24 @@ basedpyright and LSP checks. Offline replay of 567 saved records reproduced all
 833 cues exactly in text, timestamps and validity. A real short-window child
 process completed without loading an inference model; cleanup tests cover
 success, worker failure and interruption. GPU validation remains manual.
+
+## 2026-09-25: retry truncated or repetitive ASR windows
+
+A targeted three-window GPU investigation reproduced output-token exhaustion
+through repeated text. Each window generated 4096 tokens while remaining below
+the model context limit. Repetition penalty 1.1 stopped the observed loops;
+changing the prompt alone still allowed a highly repetitive stop-ended result.
+
+The first ASR pass retains its original decoding profile. Windows ending at the
+length limit or flagged by the pinned Qwen processor's extreme-repeat logic
+are retried once with repetition penalty 1.1 in the same model instance. Only
+those windows are resubmitted, using the original audio and language settings.
+The repetition helper is used for detection; its rewritten text is not
+published. Unrecovered windows fail during ASR with IDs and time ranges, before
+alignment starts for that file. No diagnostic artifacts or dependencies were
+added. The integrated retry is reserved for manual GPU testing.
+
+Validation passed 115 submission tests with two GPU tests excluded, plus Ruff,
+basedpyright and LSP checks. Regression coverage verifies selective single
+retries, preserved audio/language settings, ordinary repetition and early ASR
+failure after an unsuccessful retry.

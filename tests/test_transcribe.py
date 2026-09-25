@@ -2,7 +2,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import TracebackType
+from types import ModuleType, SimpleNamespace, TracebackType
 from typing import Final, final
 from unittest.mock import Mock
 
@@ -421,6 +421,120 @@ def test_source_language_is_optional_and_parsed_from_model_output() -> None:
     assert result == ("French", "Bonjour. Merci !")
     forced = QwenASR.parse_output("Hello world.", "English")
     assert forced == ("English", "Hello world.")
+
+
+@pytest.fixture
+def qwen_llm(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    fake_vllm = ModuleType("vllm")
+    fake_inputs = ModuleType("vllm.inputs")
+    setattr(fake_vllm, "SamplingParams", SimpleNamespace)
+    setattr(fake_inputs, "TextPrompt", dict)
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.inputs", fake_inputs)
+    return Mock()
+
+
+def _qwen_output(text: str, finish_reason: str = "stop") -> SimpleNamespace:
+    return SimpleNamespace(
+        outputs=[SimpleNamespace(text=text, finish_reason=finish_reason)]
+    )
+
+
+@pytest.mark.parametrize(
+    "text,finish_reason",
+    [("Partial", "length"), ("Echo!" * 25, "stop"), ("a" * 21, "stop")],
+)
+def test_qwen_retries_only_suspect_windows_once(
+    qwen_llm: Mock, text: str, finish_reason: str
+) -> None:
+    import numpy as np
+    from src.aligner import AlignmentRecord
+    from src.transcribe import QwenASR
+
+    records = [
+        AlignmentRecord(
+            segment_id="a", start=0, end=16000, text="", language="English"
+        ),
+        AlignmentRecord(
+            segment_id="b", start=32000, end=64000, text="", language="French"
+        ),
+        AlignmentRecord(
+            segment_id="c", start=64000, end=80000, text="", language="English"
+        ),
+    ]
+    audio = np.arange(80000, dtype=np.float32)
+    qwen_llm.generate.side_effect = [
+        [
+            _qwen_output("Keep this."),
+            _qwen_output(text, finish_reason),
+            _qwen_output("Last."),
+        ],
+        [_qwen_output("Bonjour.")],
+    ]
+    results = QwenASR(qwen_llm).transcribe(records, audio)
+    assert [r.text for r in results] == ["Keep this.", "Bonjour.", "Last."]
+    assert [(r.segment_id, r.start, r.end, r.language) for r in results] == [
+        (r.segment_id, r.start, r.end, r.language) for r in records
+    ]
+    assert all(r.error is None for r in results)
+    first, retry = qwen_llm.generate.call_args_list
+    assert len(first.args[0]) == 3 and len(retry.args[0]) == 1
+    assert retry.args[0][0]["prompt"] == first.args[0][1]["prompt"]
+    np.testing.assert_array_equal(
+        retry.args[0][0]["multi_modal_data"]["audio"][0], audio[32000:64000]
+    )
+    assert [call.args[1].repetition_penalty for call in (first, retry)] == [1.0, 1.1]
+    assert all(
+        call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
+        for call in (first, retry)
+    )
+
+
+def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
+    import numpy as np
+    from src.aligner import AlignmentRecord
+    from src.transcribe import QwenASR
+
+    record = AlignmentRecord(segment_id="a", start=0, end=16000, text="")
+    text = "Yes, yes, yes!"
+    qwen_llm.generate.return_value = [_qwen_output("language English<asr_text>" + text)]
+    result = QwenASR(qwen_llm).transcribe([record], np.zeros(16000, dtype=np.float32))
+    assert result[0].text == text and result[0].language == "English"
+    assert qwen_llm.generate.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "text,reason", [("Partial", "length"), ("Again!" * 25, "stop")]
+)
+def test_qwen_unrecovered_window_fails_in_asr_with_time_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qwen_llm: Mock,
+    text: str,
+    reason: str,
+) -> None:
+    import numpy as np
+    from src.aligner import AlignmentRecord, write_records
+    from src.transcribe import QwenWorker
+
+    qwen_llm.generate.return_value = [_qwen_output(text, reason)]
+    write_records(
+        tmp_path / "prepare.json",
+        [
+            AlignmentRecord(
+                segment_id="w1", start=16000, end=32000, text="", language="English"
+            )
+        ],
+    )
+    monkeypatch.setattr(QwenWorker, "_load_model", staticmethod(lambda stage: qwen_llm))
+    monkeypatch.setattr(
+        transcribe_module, "read_audio", lambda path: np.zeros(32000, dtype=np.float32)
+    )
+    QwenWorker("asr", "English", True).run([(tmp_path / "audio.wav", tmp_path)])
+    assert qwen_llm.generate.call_count == 2
+    assert not (tmp_path / "asr.json").exists()
+    error = (tmp_path / "asr.error").read_text()
+    assert "w1" in error and "1.000-2.000 s" in error and "after one retry" in error
 
 
 @pytest.mark.parametrize("quiet", (False, True))

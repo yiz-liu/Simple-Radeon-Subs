@@ -333,12 +333,18 @@ and timing rules live in `src/aligner.py`:
 4. Valid alignment is retained and bounded to the window. Consecutive invalid
    spans use neighboring valid cues or the window edges. Gaps below `0.32 s`
    merge into an adjacent cue in the same window, preserving text order.
-5. Native errors and truncated ASR fail the file. Empty ASR windows produce a
-   warning. Timing fallback is an estimate and still
+5. Truncated ASR or extreme consecutive repetition triggers one retry for the
+   affected windows with `repetition_penalty=1.1`. Audio bounds and language
+   settings stay the same. A retry that remains invalid fails the file during
+   ASR and reports the affected time ranges. Native errors also fail the file.
+   Empty ASR windows produce a warning. Timing fallback is an estimate and still
    benefits from listening checks. Qwen cleanup preserves long cue durations.
 
 ASR and alignment use BF16, eager execution, model-runner V1, four concurrent
 requests, an `8192`-token context/batch budget and `0.5` GPU memory utilization.
+The first ASR pass uses greedy decoding with a `4096`-token output limit and
+`repetition_penalty=1.0`. Repeat detection uses the pinned Qwen processor's
+extreme-repeat rules to flag suspect text for retry.
 
 ## Subtitle Cleanup
 
