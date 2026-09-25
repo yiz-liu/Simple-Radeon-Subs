@@ -2,6 +2,35 @@
 
 set -euo pipefail
 
+asr_backend="whisper"
+check_only=false
+while (($# > 0)); do
+    case "$1" in
+        --asr-backend)
+            if [[ $# -lt 2 || ! "$2" =~ ^(whisper|qwen)$ ]]; then
+                echo "Expected --asr-backend whisper|qwen" >&2
+                exit 2
+            fi
+            asr_backend="$2"
+            shift 2
+            ;;
+        --check)
+            check_only=true
+            shift
+            ;;
+        --help)
+            echo "Usage: $0 [--asr-backend whisper|qwen] [--check]"
+            echo "Download or verify the selected ASR and shared translation weights."
+            echo "--check verifies existing files without downloading."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
 readonly WHISPER_REPOSITORY="timeless/whispercpp"
 readonly WHISPER_REVISION="master"
 readonly WHISPER_FILENAME="ggml-large-v3-turbo.bin"
@@ -25,6 +54,11 @@ readonly -a TRANSLATION_SHA256S=(
     "b03792cfc8278a228b3b452edb57625b5c6a2a1e77b860d21395d474c03968ea"
     "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
 )
+
+readonly QWEN_ASR_REVISION="7278e1e70fe206f11671096ffdd38061171dd6e5"
+readonly QWEN_ALIGNER_REVISION="c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
+readonly QWEN_VAD_SHA256="1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+readonly QWEN_VAD_URL="https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.2/src/silero_vad/data"
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 whisper_model_dir="${project_root}/models/whisper"
@@ -53,6 +87,10 @@ verify_existing_file() {
     local expected_sha256="$2"
 
     if [[ ! -e "${path}" ]]; then
+        if [[ "${check_only}" == true ]]; then
+            echo "Required model file is missing: ${path}" >&2
+            exit 1
+        fi
         return
     fi
     if [[ ! -f "${path}" ]]; then
@@ -130,22 +168,111 @@ verify_translation_model() {
     return 0
 }
 
-for command_name in awk curl mktemp mv sha256sum; do
+prepare_work_dir() {
+    if [[ -z "${work_dir}" ]]; then
+        mkdir -p "${project_root}/models"
+        work_dir="$(mktemp -d "${project_root}/models/.download.XXXXXX")"
+    fi
+}
+
+require_modelscope() {
+    if [[ ! -x "${modelscope_cli}" ]]; then
+        echo "ModelScope CLI not found: ${modelscope_cli}; run uv sync first." >&2
+        exit 1
+    fi
+}
+
+download_http_file() {
+    local url="$1" destination="$2" expected_sha256="$3"
+    prepare_work_dir
+    local downloaded="${work_dir}/$(basename -- "${destination}")"
+    curl --fail --location --retry 3 --retry-all-errors --show-error \
+        --output "${downloaded}" "${url}"
+    mkdir -p "$(dirname -- "${destination}")"
+    install_verified_file "${downloaded}" "${destination}" "${expected_sha256}"
+}
+
+qwen_weight_files() {
+    cat <<'QWEN_FILES'
+Qwen3-ASR-1.7B/chat_template.json 75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff
+Qwen3-ASR-1.7B/config.json 2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f
+Qwen3-ASR-1.7B/generation_config.json 1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c
+Qwen3-ASR-1.7B/merges.txt 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5
+Qwen3-ASR-1.7B/model-00001-of-00002.safetensors a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6
+Qwen3-ASR-1.7B/model-00002-of-00002.safetensors 6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc
+Qwen3-ASR-1.7B/model.safetensors.index.json f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60
+Qwen3-ASR-1.7B/preprocessor_config.json 45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d
+Qwen3-ASR-1.7B/tokenizer_config.json 4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c
+Qwen3-ASR-1.7B/vocab.json ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
+Qwen3-ForcedAligner-0.6B/chat_template.json 75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff
+Qwen3-ForcedAligner-0.6B/config.json d616c65d46c4b90bdc651b0a0963ea932732241140f337f9bb6b0335a9c8ef09
+Qwen3-ForcedAligner-0.6B/generation_config.json 948d089b23bca1d214e768d59c4438365665f52ec6d33678f4062206b3fbbb8c
+Qwen3-ForcedAligner-0.6B/merges.txt 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5
+Qwen3-ForcedAligner-0.6B/model.safetensors 47831d0e82f96b20e9034dba01a075ee06436654719f6a68289e49f1b65ce0e7
+Qwen3-ForcedAligner-0.6B/preprocessor_config.json 45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d
+Qwen3-ForcedAligner-0.6B/tokenizer_config.json 3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c
+Qwen3-ForcedAligner-0.6B/vocab.json ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
+QWEN_FILES
+}
+
+download_qwen_model() {
+    local model_name="$1" revision="$2"
+    local relative_path expected_sha256 path
+    local -a filenames=() checksums=()
+    while read -r relative_path expected_sha256; do
+        [[ "${relative_path}" == "${model_name}/"* ]] || continue
+        path="${project_root}/models/${relative_path}"
+        verify_existing_file "${path}" "${expected_sha256}"
+        if [[ ! -f "${path}" ]]; then
+            filenames+=("${relative_path#*/}")
+            checksums+=("${expected_sha256}")
+        fi
+    done < <(qwen_weight_files)
+    if ((${#filenames[@]} == 0)); then
+        return
+    fi
+    require_command uvx
+    prepare_work_dir
+    local download_dir="${work_dir}/${model_name}"
+    uvx hf download "Qwen/${model_name}" \
+        --revision "${revision}" --local-dir "${download_dir}"
+    mkdir -p "${project_root}/models/${model_name}"
+    local index
+    for index in "${!filenames[@]}"; do
+        install_verified_file \
+            "${download_dir}/${filenames[${index}]}" \
+            "${project_root}/models/${model_name}/${filenames[${index}]}" \
+            "${checksums[${index}]}"
+    done
+}
+
+prepare_qwen_weights() {
+    download_qwen_model "Qwen3-ASR-1.7B" "${QWEN_ASR_REVISION}"
+    download_qwen_model "Qwen3-ForcedAligner-0.6B" "${QWEN_ALIGNER_REVISION}"
+    local vad_path="${project_root}/models/silero-vad/silero_vad.onnx"
+    verify_existing_file "${vad_path}" "${QWEN_VAD_SHA256}"
+    if [[ ! -f "${vad_path}" ]]; then
+        download_http_file "${QWEN_VAD_URL}/silero_vad.onnx" "${vad_path}" "${QWEN_VAD_SHA256}"
+    fi
+}
+
+for command_name in awk sha256sum; do
     require_command "${command_name}"
 done
-
-if [[ ! -x "${modelscope_cli}" ]]; then
-    echo "ModelScope CLI not found: ${modelscope_cli}" >&2
-    echo "Run uv sync before downloading model weights." >&2
-    exit 1
+if [[ "${check_only}" == false ]]; then
+    for command_name in curl mktemp mv; do
+        require_command "${command_name}"
+    done
 fi
-
-mkdir -p "${whisper_model_dir}"
 
 whisper_path="${whisper_model_dir}/${WHISPER_FILENAME}"
 vad_path="${whisper_model_dir}/${VAD_FILENAME}"
-verify_existing_file "${whisper_path}" "${WHISPER_SHA256}"
-verify_existing_file "${vad_path}" "${VAD_SHA256}"
+if [[ "${asr_backend}" == "qwen" ]]; then
+    prepare_qwen_weights
+else
+    verify_existing_file "${whisper_path}" "${WHISPER_SHA256}"
+    verify_existing_file "${vad_path}" "${VAD_SHA256}"
+fi
 
 translation_model_ready=false
 if verify_translation_model "${translation_model_dir}"; then
@@ -153,14 +280,20 @@ if verify_translation_model "${translation_model_dir}"; then
     echo "Already downloaded: ${translation_model_dir}"
 fi
 
-if [[ -f "${whisper_path}" && -f "${vad_path}" && "${translation_model_ready}" == true ]]; then
+if [[ ( "${asr_backend}" == "qwen" || ( -f "${whisper_path}" && -f "${vad_path}" ) ) && "${translation_model_ready}" == true ]]; then
     echo "Model weights are ready."
     exit 0
 fi
 
-work_dir="$(mktemp -d "${project_root}/models/.download.XXXXXX")"
+if [[ "${check_only}" == true ]]; then
+    echo "Required model files are missing; run without --check to download." >&2
+    exit 1
+fi
+prepare_work_dir
 
-if [[ ! -f "${whisper_path}" ]]; then
+if [[ "${asr_backend}" == "whisper" && ! -f "${whisper_path}" ]]; then
+    require_modelscope
+    mkdir -p "${whisper_model_dir}"
     whisper_download_dir="${work_dir}/whisper"
     mkdir -p "${whisper_download_dir}"
     echo "Downloading ${WHISPER_FILENAME} from ModelScope (${WHISPER_REPOSITORY})"
@@ -175,21 +308,12 @@ if [[ ! -f "${whisper_path}" ]]; then
         "${WHISPER_SHA256}"
 fi
 
-if [[ ! -f "${vad_path}" ]]; then
-    vad_download_path="${work_dir}/${VAD_FILENAME}"
-    echo "Downloading ${VAD_FILENAME} from the official whisper.cpp VAD repository"
-    curl \
-        --fail \
-        --location \
-        --retry 3 \
-        --retry-all-errors \
-        --show-error \
-        --output "${vad_download_path}" \
-        "${VAD_URL}"
-    install_verified_file "${vad_download_path}" "${vad_path}" "${VAD_SHA256}"
+if [[ "${asr_backend}" == "whisper" && ! -f "${vad_path}" ]]; then
+    download_http_file "${VAD_URL}" "${vad_path}" "${VAD_SHA256}"
 fi
 
 if [[ "${translation_model_ready}" == false ]]; then
+    require_modelscope
     translation_download_dir="${work_dir}/translation"
     echo "Downloading translation model from ModelScope (${TRANSLATION_REPOSITORY})"
     "${modelscope_cli}" download \

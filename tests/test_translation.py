@@ -229,3 +229,23 @@ def test_length_failure_identifies_the_request_cues_and_generated_size() -> None
         match=(r"core cues 17-24 \(window 13-24\).*'length'.*7 characters"),
     ):
         _ = VLLMTranslator._parse_output(request, output)
+
+
+def test_shared_srt_writer_keeps_existing_output_when_save_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pysrt
+    from src.utils import save_subtitles_atomic
+
+    output = tmp_path / "result.srt"
+    output.write_text("previous result", encoding="utf-8")
+
+    def failed_save(self: pysrt.SubRipFile, path: str, encoding: str) -> None:
+        Path(path).write_text("partial write", encoding=encoding)
+        raise OSError("write interrupted")
+
+    monkeypatch.setattr(pysrt.SubRipFile, "save", failed_save)
+    with pytest.raises(OSError, match="write interrupted"):
+        save_subtitles_atomic(output, pysrt.SubRipFile())
+    assert output.read_text() == "previous result"
+    assert not list(tmp_path.glob(".result.srt.*.tmp"))

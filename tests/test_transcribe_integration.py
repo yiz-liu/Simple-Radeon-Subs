@@ -212,3 +212,169 @@ def test_transcribe_many_processes_two_real_audio_files_in_one_batch(
             timeout=30,
         )
         assert validation.returncode == 0, validation.stderr
+
+
+def _download_script(tmp_path: Path) -> Path:
+    import shutil
+
+    script = tmp_path / "scripts" / "download_weights.sh"
+    script.parent.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / "scripts/download_weights.sh", script
+    )
+    return script
+
+
+def test_weight_check_does_not_download_missing_files(tmp_path: Path) -> None:
+    script = _download_script(tmp_path)
+    result = subprocess.run(
+        ["bash", str(script), "--asr-backend", "qwen", "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "missing" in result.stderr
+    assert not (tmp_path / "models").exists()
+
+
+@pytest.mark.parametrize("check_only", [False, True])
+def test_weight_preparation_preserves_unexpected_existing_content(
+    tmp_path: Path, check_only: bool
+) -> None:
+    script = _download_script(tmp_path)
+    model = tmp_path / "models/Qwen3-ASR-1.7B/chat_template.json"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"unexpected existing content")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--asr-backend",
+            "qwen",
+            *(["--check"] if check_only else []),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert model.read_bytes() == b"unexpected existing content"
+    assert "Refusing to overwrite" in result.stderr
+    assert not list((tmp_path / "models").glob(".download.*"))
+
+
+def test_weight_download_rejects_corruption_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _download_script(tmp_path)
+    _fake_hf(tmp_path, monkeypatch, "corrupt download")
+    result = subprocess.run(
+        ["bash", str(script), "--asr-backend", "qwen"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "failed checksum verification" in result.stderr
+    assert not (tmp_path / "models/Qwen3-ASR-1.7B/chat_template.json").exists()
+    assert not list((tmp_path / "models").glob(".download.*"))
+
+
+def _fake_hf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> Path:
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    executable = binaries / "uvx"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+assert args[:2] == ["hf", "download"]
+assert args[3] == "--revision"
+files = ["chat_template.json", "config.json", "generation_config.json",
+         "merges.txt", "preprocessor_config.json", "tokenizer_config.json",
+         "vocab.json", "README.md"]
+if args[2] == "Qwen/Qwen3-ASR-1.7B":
+    files += ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors",
+              "model.safetensors.index.json"]
+else:
+    assert args[2] == "Qwen/Qwen3-ForcedAligner-0.6B"
+    files += ["model.safetensors"]
+root = Path(args[args.index("--local-dir") + 1])
+root.mkdir(parents=True, exist_ok=True)
+for name in files:
+    (root / name).write_bytes(os.environ["TEST_HF_CONTENT"].encode())
+with Path(os.environ["TEST_HF_LOG"]).open("a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+"""
+    )
+    executable.chmod(0o755)
+    log = tmp_path / "hf-calls.jsonl"
+    monkeypatch.setenv("TEST_HF_LOG", str(log))
+    monkeypatch.setenv("TEST_HF_CONTENT", content)
+    monkeypatch.setenv("PATH", str(binaries) + os.pathsep + os.environ["PATH"])
+    return log
+
+
+def test_qwen_weights_use_hf_revisions_and_verified_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import json
+    import re
+
+    script = _download_script(tmp_path)
+    content = "verified fixture model"
+    checksum = hashlib.sha256(content.encode()).hexdigest()
+    script.write_text(re.sub(r"[0-9a-f]{64}", checksum, script.read_text()))
+    log = _fake_hf(tmp_path, monkeypatch, content)
+    translation = tmp_path / "models/Qwen3.5-9B-AWQ-4bit"
+    translation.mkdir(parents=True)
+    for name in (
+        "config.json",
+        "model.safetensors.index.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+    ):
+        (translation / name).write_text(content)
+    vad = tmp_path / "models/silero-vad/silero_vad.onnx"
+    vad.parent.mkdir()
+    vad.write_text(content)
+    result = subprocess.run(
+        ["bash", str(script), "--asr-backend", "qwen"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [call[2] for call in calls] == [
+        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+    ]
+    assert [call[call.index("--revision") + 1] for call in calls] == [
+        "7278e1e70fe206f11671096ffdd38061171dd6e5",
+        "c7cbfc2048c462b0d63a45797104fc9db3ad62b7",
+    ]
+    for call in calls:
+        assert ".download." in call[call.index("--local-dir") + 1]
+        assert call[3] == "--revision"
+        model = tmp_path / "models" / call[2].split("/")[1]
+        assert (model / "config.json").read_text() == content
+        assert all(file.read_text() == content for file in model.glob("*.safetensors"))
+    assert not list((tmp_path / "models").glob(".download.*"))
+    checked = subprocess.run(
+        ["bash", str(script), "--asr-backend", "qwen", "--check"],
+        capture_output=True,
+        check=False,
+    )
+    assert checked.returncode == 0
+    assert len(log.read_text().splitlines()) == 2

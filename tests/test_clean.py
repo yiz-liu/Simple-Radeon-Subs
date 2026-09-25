@@ -260,3 +260,13 @@ def test_clean_srt_rejects_a_negative_duration(tmp_path: Path) -> None:
     # When / Then: The cleaner rejects it instead of deleting it silently.
     with pytest.raises(ValueError):
         _ = _clean(tmp_path, items)
+
+
+def test_qwen_cleanup_preserves_long_cue_timing(tmp_path: Path) -> None:
+    source, target = tmp_path / "raw.srt", tmp_path / "clean.srt"
+    pysrt.SubRipFile(
+        [pysrt.SubRipItem(1, start=1000, end=15000, text="A complete sentence.")]
+    ).save(str(source), encoding="utf-8")
+    clean_srt(source, target, enable_vad=False)
+    cue = pysrt.open(str(target), encoding="utf-8")[0]
+    assert (cue.start.ordinal, cue.end.ordinal) == (1000, 15000)

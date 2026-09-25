@@ -10,6 +10,7 @@ from src.audio import AudioExtractor
 from src.clean import clean_srt
 from src.logger import logger
 from src.transcribe import Transcriber, TranscriptionTask
+from src.config import ASRBackend
 from src.translation import (
     TranslationOptions,
     TranslationTask,
@@ -34,6 +35,7 @@ class PipelineOptions:
     force: bool = False
     translated_only: bool = False
     enable_vad: bool = True
+    asr_backend: ASRBackend = "whisper"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +93,7 @@ def build_jobs(plan: PipelinePlan) -> tuple[PipelineJob, ...]:
     source_label = _safe_label(plan.options.src_lang or "auto")
     vad_label = "vad" if plan.options.enable_vad else "no-vad"
     jobs: list[PipelineJob] = []
-    for input_path in plan.input_paths:
-        source = input_path.resolve()
+    for source in dict.fromkeys(path.resolve() for path in plan.input_paths):
         relative_parent = source.relative_to(plan.input_root.resolve()).parent
         output_parent = (
             source.parent
@@ -100,7 +101,8 @@ def build_jobs(plan: PipelinePlan) -> tuple[PipelineJob, ...]:
             else plan.output_dir.resolve() / relative_parent
         )
         work_dir = source.parent / f".{source.name}{WORK_DIR_SUFFIX}"
-        asr_dir = work_dir / f"asr-{source_label}-{vad_label}"
+        backend_label = "qwen-" if plan.options.asr_backend == "qwen" else ""
+        asr_dir = work_dir / f"asr-{backend_label}{source_label}-{vad_label}"
         jobs.append(
             PipelineJob(
                 input_path=source,
@@ -175,7 +177,7 @@ def run_pipeline(
     ]
     if transcription_jobs:
         try:
-            transcription_failures = Transcriber().transcribe_many(
+            transcription_failures = Transcriber(options.asr_backend).transcribe_many(
                 tuple(
                     TranscriptionTask(job.audio_path, job.raw_srt_path)
                     for job in transcription_jobs
@@ -206,7 +208,7 @@ def run_pipeline(
             clean_srt(
                 job.raw_srt_path,
                 job.cleaned_srt_path,
-                enable_vad=options.enable_vad,
+                enable_vad=options.enable_vad and options.asr_backend == "whisper",
             )
         except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
             failures[job.input_path] = JobFailure(job, "clean", str(error))

@@ -1,13 +1,35 @@
+from __future__ import annotations
+
 import argparse
+from dataclasses import dataclass
+import math
+import wave
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from tqdm import tqdm
 
-from src.config import AUDIO_CHANNELS, AUDIO_CODEC, AUDIO_SAMPLE_RATE
+from src.config import (
+    AUDIO_CHANNELS,
+    AUDIO_CODEC,
+    AUDIO_SAMPLE_RATE,
+    AUDIO_TIMELINE_FILTER,
+    QWEN_WINDOW_MERGE_GAP_SECONDS,
+    QWEN_WINDOW_TARGET_SECONDS,
+    QWEN_VAD_MODEL_PATH,
+    QWEN_VAD_THRESHOLD,
+    QWEN_VAD_MIN_SPEECH_MS,
+    QWEN_VAD_MIN_SILENCE_MS,
+    QWEN_VAD_PAD_MS,
+    QWEN_VAD_MAX_SECONDS,
+)
 from src.logger import logger
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
 
 class AudioExtractionError(RuntimeError):
@@ -118,6 +140,8 @@ class AudioExtractor:
             "-i",
             str(input_file),
             "-vn",
+            "-af",
+            AUDIO_TIMELINE_FILTER,
             "-acodec",
             AUDIO_CODEC,
             "-ar",
@@ -171,6 +195,118 @@ class AudioExtractor:
             )
 
         return output_file
+
+
+class InvalidAudio(ValueError):
+    """Reject PCM inputs or speech windows outside the audio contract."""
+
+
+def read_audio(path: Path) -> NDArray[np.float32]:
+    import numpy as np
+
+    with wave.open(str(path), "rb") as wav:
+        if (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) != (
+            AUDIO_SAMPLE_RATE,
+            1,
+            2,
+        ):
+            raise InvalidAudio(f"Expected 16 kHz mono PCM16 WAV: {path}")
+        audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+    if not len(audio):
+        raise InvalidAudio(f"Empty audio: {path}")
+    return audio.astype(np.float32) / 32768.0
+
+
+@dataclass(frozen=True, slots=True)
+class SampleSpan:
+    start: int
+    end: int
+
+
+def processing_windows(
+    audio: NDArray[np.float32],
+    spans: list[SampleSpan],
+    target_seconds: float = QWEN_WINDOW_TARGET_SECONDS,
+) -> list[SampleSpan]:
+    if not 5 <= target_seconds <= 120:
+        raise InvalidAudio("target_seconds must be between 5 and 120")
+    groups: list[SampleSpan] = []
+    previous_end = 0
+    for span in spans:
+        if not previous_end <= span.start < span.end <= len(audio):
+            raise InvalidAudio(f"invalid or unordered audio span: {span}")
+        previous_end = span.end
+        if (
+            groups
+            and span.start - groups[-1].end
+            <= QWEN_WINDOW_MERGE_GAP_SECONDS * AUDIO_SAMPLE_RATE
+        ):
+            groups[-1] = SampleSpan(groups[-1].start, span.end)
+        else:
+            groups.append(span)
+    return [
+        SampleSpan(start, end)
+        for group in groups
+        for start, end in partition_audio(audio, group.start, group.end, target_seconds)
+    ]
+
+
+def partition_audio(
+    audio: NDArray[np.float32], start: int, end: int, target_seconds: float
+) -> list[tuple[int, int]]:
+    """Partition without gaps, choosing low RMS boundaries near balanced targets."""
+    import numpy as np
+
+    pieces = math.ceil((end - start) / (target_seconds * AUDIO_SAMPLE_RATE))
+    if pieces <= 1:
+        return [(start, end)]
+    points = [start]
+    for part in range(1, pieces):
+        target = start + round((end - start) * part / pieces)
+        low = max(points[-1] + AUDIO_SAMPLE_RATE, target - 2 * AUDIO_SAMPLE_RATE)
+        high = min(
+            end - AUDIO_SAMPLE_RATE * (pieces - part), target + 2 * AUDIO_SAMPLE_RATE
+        )
+        candidates = list(range(low, high + 1, 256))
+        point = min(
+            candidates,
+            key=lambda p: float(np.mean(np.square(audio[p - 256 : p + 256]))),
+        )
+        points.append(point)
+    points.append(end)
+    return list(zip(points, points[1:]))
+
+
+class WindowPreparer:
+    def __init__(self, enable_vad: bool) -> None:
+        from silero_vad.utils_vad import OnnxWrapper
+
+        self.model = (
+            OnnxWrapper(str(QWEN_VAD_MODEL_PATH), force_onnx_cpu=True)
+            if enable_vad
+            else None
+        )
+
+    def prepare(self, audio_path: Path) -> list[SampleSpan]:
+        import torch
+        from silero_vad import get_speech_timestamps
+
+        audio = read_audio(audio_path)
+        spans = [SampleSpan(0, len(audio))]
+        if self.model is not None:
+            regions = get_speech_timestamps(
+                torch.from_numpy(audio),
+                self.model,
+                sampling_rate=AUDIO_SAMPLE_RATE,
+                return_seconds=False,
+                threshold=QWEN_VAD_THRESHOLD,
+                min_speech_duration_ms=QWEN_VAD_MIN_SPEECH_MS,
+                min_silence_duration_ms=QWEN_VAD_MIN_SILENCE_MS,
+                speech_pad_ms=QWEN_VAD_PAD_MS,
+                max_speech_duration_s=QWEN_VAD_MAX_SECONDS,
+            )
+            spans = [SampleSpan(int(s["start"]), int(s["end"])) for s in regions]
+        return processing_windows(audio, spans)
 
 
 def main():

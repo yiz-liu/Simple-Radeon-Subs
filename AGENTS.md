@@ -17,9 +17,15 @@ uv sync --locked --managed-python
 # Development tools
 uv sync --locked --managed-python --group dev
 
-# Complete GPU runtime
+# Translation / Whisper GPU runtime
 uv sync --locked --managed-python --group dev --group vllm
+
+# Include Qwen ASR, VAD and alignment
+uv sync --locked --managed-python --group dev --group qwen
 ```
+
+For Qwen assets and checks, pass `--asr-backend qwen` to
+`scripts/download_weights.sh` and `scripts/doctor.sh`.
 
 After `.venv` exists, activate it before running repository commands:
 
@@ -59,6 +65,7 @@ python run.py /path/to/video.mp4
 python run.py /path/to/movie.mkv --output-dir ./subs --src-lang de --lang French
 python run.py /path/to/video.mp4 --keep-temp
 python run.py /path/to/videos/
+python run.py /path/to/videos/ --asr-backend qwen --keep-temp
 ```
 
 Run individual stages:
@@ -86,15 +93,17 @@ runtime dependency.
 
 - `run.py`: CLI input discovery and pipeline entry point
 - `src/pipeline.py`: stage-wise batch scheduling, sidecar reuse, and failure isolation
-- `src/audio.py`: FFmpeg audio extraction and progress parsing
-- `src/transcribe.py`: standalone fixed whisper.cpp adapter
-- `src/whisper_batch.py`: one-process multi-file whisper.cpp execution
+- `src/audio.py`: FFmpeg extraction, PCM reading, Silero VAD and audio windows
+- `src/transcribe.py`: shared facade, Qwen parent coordinator, stage worker and ASR
+- `src/aligner.py`: ForcedAligner inference, result records and subtitle timing
+- `src/whisper_batch.py`: shared transcription task types and whisper.cpp batching
 - `src/clean.py`: conservative SRT normalization and duplicate filtering
 - `src/translate.py`: standalone translation CLI
 - `src/translation.py`: subtitle preparation and local vLLM inference
 - `src/translation_requests.py`: request windows and structured output parsing
 - `src/translation_output.py`: final subtitle construction and atomic publication
-- `src/config.py`: managed paths and fixed runtime constants
+- `src/config.py`: managed paths and runtime constants grouped by stage
+- `src/utils.py`: atomic SRT publication shared by transcription and translation
 - `src/logger.py`: shared logging configuration
 
 Directory inputs run stage by stage across all pending files. A final SRT skips
@@ -139,6 +148,6 @@ execution manually when the native integration changes.
 - WSL2 on x86-64 Linux
 - AMD Radeon RX 9070 XT (`gfx1201`)
 - system ROCm 7.2.4
-- vLLM 0.25.1 `rocm723` wheel stack
+- vLLM 0.27.1 `rocm723` wheel stack
 
 Other compatible AMD GPUs may work but are outside the current tested baseline.

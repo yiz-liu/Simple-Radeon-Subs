@@ -218,3 +218,99 @@ device name. `scripts/patch_vllm.py` is the check-first ROCm patch entry point.
 The translation smoke test is now `scripts/basic_translation.py`. It submits
 four requests in one vLLM batch, with three French subtitle lines from classic
 works in each request, and prints the four structured translation responses.
+
+## 2026-09-25: source timeline and Qwen transcription backend
+
+FFmpeg extraction now uses `AUDIO_TIMELINE_FILTER` from `src.config`:
+`aresample=16000:async=1:first_pts=0:min_hard_comp=0.001`. It fills or trims
+samples to preserve source timestamps without soft tempo compensation.
+Regression fixtures cover continuous audio and 25 ms / 500 ms timestamp gaps.
+A long-form control showed that this change can trigger substantial repetition
+with the fixed Whisper VAD profile, even though the extracted timeline is
+correct. This remains a recognition limitation, documented in the README.
+
+`--asr-backend qwen` routes the existing transcription interface through local
+Silero ONNX, Qwen3-ASR and Qwen3-ForcedAligner. Whisper remains the default.
+Qwen audio preparation lives in `src/audio.py`, batch orchestration and ASR in
+`src/transcribe.py`, and forced alignment and timing in `src/aligner.py`. Batch
+processing reuses one ASR model load and one aligner model load, in separate processes that exit before translation.
+Backend-specific SRT sidecars share the canonical WAV. Qwen cleanup preserves
+validated long cue boundaries instead of applying the Whisper VAD duration cap.
+
+The promoted timing rules use short windows directly and repair invalid long
+window alignment within neighboring boundaries. A preceding full-length
+prototype comparison reduced aligner requests from 564 to 163 and total time
+from 258.09 to 239.61 seconds. These are single-run prototype measurements,
+not throughput claims for the integrated backend. Empty transcripts and recovered
+cue origins remain explicit in diagnostics.
+
+The weight downloader pins official model revisions and verifies runtime files
+with SHA-256. `scripts/download_weights.sh --asr-backend qwen` prepares the full
+model set; `scripts/doctor.sh --asr-backend qwen` selects the matching checks.
+The `vllm` group declares vLLM itself. The `qwen` group includes `vllm` and
+declares Silero, tokenization, array processing, result serialization and
+processor dependencies. Transformers is pinned to the native Qwen processor
+version used by this route. Weight lists and hashes are stored directly in the
+Shell downloader, whose `--check` mode is also used by the doctor.
+No package installation or runtime patch was performed during integration.
+
+Integration GPU validation was attempted but stopped before inference because
+7.30 GiB was free and the fixed profile required 7.91 GiB. Further GPU tests were
+deferred to manual validation. CPU regression tests, static checks, CLI boundary
+checks and pinned local weight verification cover the integration separately.
+
+After consolidation, the submission test set passed 101 tests; two GPU
+integration tests remain reserved for manual validation. The complete local
+suite passed 152 non-GPU tests. Ruff, basedpyright, LSP diagnostics, shell syntax
+and lock consistency checks passed. Existing pinned weights passed the unified
+Shell check. Offline replay of 567 existing records reproduced all 833 subtitle
+cues exactly, including text, timestamps and timing origins. A real child-process
+check confirmed that short windows skip model loading, and importing the default
+transcription interface does not import the Qwen runtime dependencies.
+
+## 2026-09-25: transcription ownership and weight download entry
+
+Qwen model downloads now use `uvx hf download` without filename arguments to fetch
+complete repositories at pinned revisions into staging directories inside the
+existing Shell downloader. Only verified runtime files are installed. Local
+checksum checks and publication safeguards remain in the script; `--check` never
+invokes uvx.
+The shared translation model retains its existing download source.
+
+`Transcriber` selects the backend, `QwenBatchRunner` launches stage processes,
+`QwenWorker` owns each stage's model lifecycle, and `QwenASR` handles decoding and
+language parsing. Path-specific stateless helpers now live on their owning
+classes. `src/utils.py` owns atomic SRT saving for transcription and translation.
+Configuration constants are grouped by stage without changing their values.
+Named exception subclasses retain inherited behavior and document the failures
+they identify. GPU inference remains deferred to manual validation.
+
+The submission suite passed 103 tests with two GPU tests excluded; the complete
+local suite passed 154 non-GPU tests. Static checks and existing-weight checks
+passed. An offline replay retained the same 833 cues from 567 records, and the
+short-window child-process check loaded no inference model. HF invocation was
+verified through the Shell script using a controlled CLI substitute; no weights
+needed downloading in the installed environment.
+
+Directory job planning now deduplicates resolved source paths before extraction,
+so symbolic-link aliases cannot create duplicate extraction tasks or inflate
+batch counts. Recursive discovery is explicit in CLI help and the README.
+Qwen diagnostic-directory announcements were initially moved to DEBUG. The
+production cleanup below subsequently removed their creation entirely.
+
+## 2026-09-25: remove Qwen experiment diagnostics from production
+
+Removed persistent `raw.qwen/run-*` directories, stage reports, copied native
+logs, `cues.json`, `run.json`, performance counters, raw timestamp decoding and
+cue provenance metadata. Model reuse and subtitle timing rules remain unchanged.
+The parent sends job inputs through stdin; stage results and per-file errors
+use a scoped temporary directory that is removed on success, failure or a
+handled interruption. Native failures report the exit code and a bounded output
+tail instead of referring to retained log files. WAV and SRT pipeline caches
+continue to follow the existing sidecar policy.
+
+Validation passed 109 submission tests with two GPU tests excluded, plus Ruff,
+basedpyright and LSP checks. Offline replay of 567 saved records reproduced all
+833 cues exactly in text, timestamps and validity. A real short-window child
+process completed without loading an inference model; cleanup tests cover
+success, worker failure and interruption. GPU validation remains manual.

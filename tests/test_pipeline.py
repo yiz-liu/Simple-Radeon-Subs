@@ -6,6 +6,7 @@ import pytest
 
 import src.pipeline as pipeline_module
 from src.pipeline import PipelineOptions, PipelinePlan, build_jobs, run_pipeline
+from src.config import ASRBackend
 
 
 def _write_srt(path: Path, text: str) -> None:
@@ -22,17 +23,23 @@ def _write_srt(path: Path, text: str) -> None:
     ).save(str(path), encoding="utf-8")
 
 
+@pytest.mark.parametrize("asr_backend", ("whisper", "qwen"))
 @pytest.mark.parametrize("enable_vad", (False, True))
 def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     enable_vad: bool,
+    asr_backend: ASRBackend,
 ) -> None:
     # Given: Two source files and lightweight adapters recording stage order.
     first = tmp_path / "first.wav"
     second = tmp_path / "second.mp3"
     first.write_bytes(b"first-source")
     second.write_bytes(b"second-source")
+    first_alias = tmp_path / "first-alias.wav"
+    second_alias = tmp_path / "second-alias.mp3"
+    first_alias.symlink_to(first)
+    second_alias.symlink_to(second)
     events: list[str] = []
     extraction_progress = MagicMock()
     extraction_progress.__enter__.return_value = extraction_progress
@@ -55,6 +62,9 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
             return destination
 
     class FakeTranscriber:
+        def __init__(self, backend: str = "whisper") -> None:
+            assert backend == asr_backend
+
         def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
             events.append(f"transcribe:{len(tasks)}:{enable_vad}")
             for task in tasks:
@@ -68,7 +78,9 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
                 _write_srt(task.output_path, task.input_path.stem)
             return []
 
-    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
+    def fake_clean(
+        input_path: Path, output_path: Path | None, enable_vad: bool
+    ) -> None:
         events.append(f"clean:{input_path.parent.parent.name}:{enable_vad}")
         _write_srt(output_path or input_path, input_path.stem)
 
@@ -84,10 +96,11 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
         force=True,
         translated_only=True,
         enable_vad=enable_vad,
+        asr_backend=asr_backend,
     )
     jobs = build_jobs(
         PipelinePlan(
-            input_paths=(first, second),
+            input_paths=(first, second_alias, first_alias, second, first),
             input_root=tmp_path,
             output_dir=tmp_path / "output",
             options=options,
@@ -98,12 +111,14 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
     result = run_pipeline(jobs, options)
 
     # Then: Stages are global, heavyweight adapters run once, and sources survive.
+    assert tuple(job.input_path for job in jobs) == (first, second)
     assert result.failures == ()
     assert events[:2] == ["extract:first.wav", "extract:second.mp3"]
     assert events[2] == f"transcribe:2:{enable_vad}"
+    shorten_long_cues = enable_vad and asr_backend == "whisper"
     assert events[3:5] == [
-        f"clean:.first.wav.simple-radeon-subs:{enable_vad}",
-        f"clean:.second.mp3.simple-radeon-subs:{enable_vad}",
+        f"clean:.first.wav.simple-radeon-subs:{shorten_long_cues}",
+        f"clean:.second.mp3.simple-radeon-subs:{shorten_long_cues}",
     ]
     assert events[5] == "translate:2"
     progress_factory.assert_called_once_with(
@@ -145,6 +160,9 @@ def test_pipeline_isolates_failed_extraction_and_reports_failure(
             return destination
 
     class FakeTranscriber:
+        def __init__(self, backend: str = "whisper") -> None:
+            assert backend == "whisper"
+
         def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
             assert [task.audio_path.parent.name for task in tasks] == [
                 ".healthy.mp4.simple-radeon-subs"
@@ -163,7 +181,9 @@ def test_pipeline_isolates_failed_extraction_and_reports_failure(
     monkeypatch.setattr(pipeline_module, "Transcriber", FakeTranscriber)
     monkeypatch.setattr(pipeline_module, "VLLMTranslator", FakeTranslator)
 
-    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
+    def fake_clean(
+        input_path: Path, output_path: Path | None, enable_vad: bool
+    ) -> None:
         _write_srt(output_path or input_path, "cleaned")
 
     monkeypatch.setattr(pipeline_module, "clean_srt", fake_clean)
@@ -283,6 +303,9 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
             return destination
 
     class FakeTranscriber:
+        def __init__(self, backend: str = "whisper") -> None:
+            assert backend == "whisper"
+
         def transcribe_many(self, tasks, language=None, quiet=False, enable_vad=False):
             for task in tasks:
                 _write_srt(task.output_path, "raw")
@@ -294,7 +317,9 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
                 _write_srt(task.output_path, "translated")
             return []
 
-    def fake_clean(input_path: Path, output_path: Path | None, enable_vad: bool) -> None:
+    def fake_clean(
+        input_path: Path, output_path: Path | None, enable_vad: bool
+    ) -> None:
         _write_srt(output_path or input_path, "cleaned")
 
     monkeypatch.setattr(pipeline_module, "AudioExtractor", FakeExtractor)
@@ -323,3 +348,15 @@ def test_existing_final_skips_after_successful_sidecar_cleanup(
     assert result.succeeded == ()
     assert result.failures == ()
     assert result.skipped == jobs
+
+
+def test_backend_sidecars_do_not_reuse_whisper_subtitles(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    whisper = build_jobs(PipelinePlan((source,), tmp_path, None, PipelineOptions()))[0]
+    qwen = build_jobs(
+        PipelinePlan((source,), tmp_path, None, PipelineOptions(asr_backend="qwen"))
+    )[0]
+    assert whisper.raw_srt_path != qwen.raw_srt_path
+    assert whisper.audio_path == qwen.audio_path
+    assert whisper.final_srt_path == qwen.final_srt_path

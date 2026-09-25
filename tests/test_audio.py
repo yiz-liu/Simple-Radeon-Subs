@@ -1,9 +1,13 @@
-import wave
 from pathlib import Path
+import subprocess
 from typing import Final
 from unittest.mock import MagicMock
+import wave
 
+import numpy as np
 import pytest
+
+from src.audio import SampleSpan, processing_windows
 
 from src.audio import AudioExtractor, parse_out_time_seconds
 from src.config import AUDIO_CHANNELS, AUDIO_SAMPLE_RATE
@@ -66,6 +70,45 @@ def test_extract_converts_example_video_to_whisper_wav(tmp_path: Path) -> None:
         assert audio.getnframes() > 0
 
 
+@pytest.mark.parametrize("gap_seconds", (0.0, 0.025, 0.5))
+def test_extract_preserves_source_timestamp_gaps(
+    tmp_path: Path, gap_seconds: float
+) -> None:
+    extractor = AudioExtractor()
+    source = tmp_path / "timestamp-gap.nut"
+    subprocess.run(
+        [
+            extractor.ffmpeg_path,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=16000:duration=1",
+            "-af",
+            "asetnsamples=n=160:p=0,"
+            f"asetpts=PTS+if(gte(T\\,0.5)\\,{gap_seconds}/TB\\,0)",
+            "-c:a",
+            "pcm_s16le",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    output = extractor.extract(source, tmp_path / "extracted.wav")
+
+    with wave.open(str(output), "rb") as audio:
+        assert audio.getnframes() == round((1 + gap_seconds) * AUDIO_SAMPLE_RATE)
+        audio.setpos(AUDIO_SAMPLE_RATE // 2)
+        gap_samples = round(gap_seconds * AUDIO_SAMPLE_RATE)
+        assert audio.readframes(gap_samples) == bytes(gap_samples * 2)
+        audio.setpos(round((0.75 + gap_seconds) * AUDIO_SAMPLE_RATE))
+        assert any(audio.readframes(AUDIO_SAMPLE_RATE // 8))
+
+
 def test_extract_uses_a_reusable_nested_progress_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -91,3 +134,39 @@ def test_extract_uses_a_reusable_nested_progress_line(
     assert progress_options["unit"] == "s"
     assert progress_options["position"] == 1
     assert progress_options["leave"] is False
+
+
+def test_windows_keep_all_speech_and_intervening_short_silence() -> None:
+    audio = np.ones(66 * 16000, dtype=np.float32)
+    audio[32 * 16000 : 33 * 16000] = 0
+    spans = [SampleSpan(16000, 32000), SampleSpan(40000, 65 * 16000)]
+    windows = processing_windows(audio, spans)
+    assert windows[0].start == 16000
+    assert windows[-1].end == 65 * 16000
+    assert all(a.end == b.start for a, b in zip(windows, windows[1:]))
+    assert sum(w.end - w.start for w in windows) == 64 * 16000
+    assert max(w.end - w.start for w in windows) <= 34 * 16000
+
+
+def test_long_silence_stays_outside_processing_windows() -> None:
+    audio = np.ones(20 * 16000, dtype=np.float32)
+    spans = [SampleSpan(16000, 5 * 16000), SampleSpan(15 * 16000, 19 * 16000)]
+    assert processing_windows(audio, spans) == spans
+
+
+def test_tiny_adjacent_segment_gets_continuous_context() -> None:
+    audio = np.ones(10 * 16000, dtype=np.float32)
+    spans = [SampleSpan(1600, 8000), SampleSpan(10000, 9 * 16000)]
+    assert processing_windows(audio, spans) == [SampleSpan(1600, 9 * 16000)]
+
+
+def test_invalid_or_unordered_spans_are_rejected() -> None:
+    audio = np.ones(16000, dtype=np.float32)
+    with pytest.raises(ValueError):
+        processing_windows(audio, [SampleSpan(0, 20000)])
+    with pytest.raises(ValueError):
+        processing_windows(audio, [SampleSpan(500, 1000), SampleSpan(100, 400)])
+
+
+def test_empty_vad_produces_no_windows() -> None:
+    assert processing_windows(np.zeros(16000, dtype=np.float32), []) == []

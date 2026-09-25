@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Final
 
 from src.logger import logger
+from src.config import ASRBackend
 from src.pipeline import (
     WORK_DIR_SUFFIX,
     PipelineOptions,
@@ -59,13 +60,22 @@ class _Arguments(argparse.Namespace):
     force: bool = False
     translated_only: bool = False
     enable_vad: bool = True
+    asr_backend: ASRBackend = "whisper"
 
 
 def _parse_arguments() -> _Arguments:
     parser = argparse.ArgumentParser(
         description="End-to-End Movie Subtitle Translator Pipeline."
     )
-    _ = parser.add_argument("input", help="Path to an input media file or directory.")
+    _ = parser.add_argument(
+        "input", help="Path to a media file or a directory scanned recursively."
+    )
+    _ = parser.add_argument(
+        "--asr-backend",
+        choices=("whisper", "qwen"),
+        default="whisper",
+        help="Transcription backend (default: whisper).",
+    )
     _ = parser.add_argument("-o", "--output-dir", help="Final subtitle directory.")
     _ = parser.add_argument("--lang", default="Chinese", help="Target language.")
     _ = parser.add_argument(
@@ -122,6 +132,7 @@ def main() -> int:
         force=arguments.force,
         translated_only=arguments.translated_only,
         enable_vad=arguments.enable_vad,
+        asr_backend=arguments.asr_backend,
     )
     try:
         jobs = build_jobs(

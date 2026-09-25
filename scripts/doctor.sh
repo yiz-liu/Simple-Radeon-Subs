@@ -2,6 +2,19 @@
 
 set -uo pipefail
 
+asr_backend="whisper"
+if [[ "${1:-}" == "--help" ]]; then
+    echo "Usage: $0 [--asr-backend whisper|qwen]"
+    exit 0
+fi
+if (($# > 0)); then
+    if [[ $# != 2 || "$1" != "--asr-backend" || ! "$2" =~ ^(whisper|qwen)$ ]]; then
+        echo "Usage: $0 [--asr-backend whisper|qwen]" >&2
+        exit 2
+    fi
+    asr_backend="$2"
+fi
+
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 venv_dir="${project_root}/.venv"
 python="${venv_dir}/bin/python"
@@ -81,35 +94,48 @@ PY
     fi
 fi
 
-if [[ -x "${whisper_cli}" ]]; then
-    if "${whisper_cli}" --version >/dev/null 2>&1; then
-        pass "whisper-cli executable"
+if [[ "${asr_backend}" == "qwen" ]]; then
+    if "${project_root}/scripts/download_weights.sh" --asr-backend qwen --check; then
+        pass "Qwen ASR, ForcedAligner and Silero weights"
     else
-        fail "whisper-cli could not start: ${whisper_cli}"
+        fail "Qwen model files"
     fi
-
-    ldd_output="$(ldd "${whisper_cli}" 2>&1)"
-    if grep -q "not found" <<<"${ldd_output}"; then
-        fail "whisper-cli has unresolved shared libraries"
-    elif grep -Eq 'lib(whisper|ggml)' <<<"${ldd_output}"; then
-        fail "whisper-cli depends on non-system whisper.cpp shared libraries"
+    if "${python}" -c 'import nagisa, silero_vad; from transformers.models.qwen3_asr.processing_qwen3_asr import Qwen3ASRProcessor'; then
+        pass "Qwen processor and VAD dependencies"
     else
-        pass "whisper-cli native library linkage"
+        fail "Qwen Python dependencies"
     fi
 else
-    fail "whisper-cli not found: ${whisper_cli}"
-fi
+    if [[ -x "${whisper_cli}" ]]; then
+        if "${whisper_cli}" --version >/dev/null 2>&1; then
+            pass "whisper-cli executable"
+        else
+            fail "whisper-cli could not start: ${whisper_cli}"
+        fi
 
-if [[ -f "${whisper_model}" && -s "${whisper_model}" ]]; then
-    pass "Whisper model: ${whisper_model}"
-else
-    fail "Whisper model missing or empty: ${whisper_model}"
-fi
+        ldd_output="$(ldd "${whisper_cli}" 2>&1)"
+        if grep -q "not found" <<<"${ldd_output}"; then
+            fail "whisper-cli has unresolved shared libraries"
+        elif grep -Eq 'lib(whisper|ggml)' <<<"${ldd_output}"; then
+            fail "whisper-cli depends on non-system whisper.cpp shared libraries"
+        else
+            pass "whisper-cli native library linkage"
+        fi
+    else
+        fail "whisper-cli not found: ${whisper_cli}"
+    fi
 
-if [[ -f "${vad_model}" && -s "${vad_model}" ]]; then
-    pass "VAD model: ${vad_model}"
-else
-    fail "VAD model missing or empty: ${vad_model}"
+    if [[ -f "${whisper_model}" && -s "${whisper_model}" ]]; then
+        pass "Whisper model: ${whisper_model}"
+    else
+        fail "Whisper model missing or empty: ${whisper_model}"
+    fi
+
+    if [[ -f "${vad_model}" && -s "${vad_model}" ]]; then
+        pass "VAD model: ${vad_model}"
+    else
+        fail "VAD model missing or empty: ${vad_model}"
+    fi
 fi
 
 if ((failures > 0)); then

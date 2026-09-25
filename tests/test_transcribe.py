@@ -344,11 +344,15 @@ def test_transcribe_does_not_require_the_vad_model_when_disabled(
     )
 
     # When / Then: Explicitly disabled VAD does not require its managed model.
-    assert Transcriber().transcribe(
-        fake_runtime.audio,
-        quiet=True,
-        enable_vad=False,
-    ).is_file()
+    assert (
+        Transcriber()
+        .transcribe(
+            fake_runtime.audio,
+            quiet=True,
+            enable_vad=False,
+        )
+        .is_file()
+    )
 
 
 def test_transcribe_many_uses_one_process_and_publishes_each_output(
@@ -406,3 +410,215 @@ def test_transcribe_many_isolates_a_missing_native_output(
     assert [failure.task for failure in failures] == [tasks[1]]
     assert first_output.is_file()
     assert not second_output.exists()
+
+
+def test_source_language_is_optional_and_parsed_from_model_output() -> None:
+    from src.transcribe import QwenASR
+
+    assert QwenASR.resolve_language(None) is None
+    assert QwenASR.resolve_language("fr") == "French"
+    result = QwenASR.parse_output("language French<asr_text>Bonjour. Merci !", None)
+    assert result == ("French", "Bonjour. Merci !")
+    forced = QwenASR.parse_output("Hello world.", "English")
+    assert forced == ("English", "Hello world.")
+
+
+@pytest.mark.parametrize("quiet", (False, True))
+@pytest.mark.parametrize(
+    "failure", (None, RuntimeError("worker failed"), KeyboardInterrupt())
+)
+def test_qwen_batch_always_removes_temporary_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    quiet: bool,
+    failure: BaseException | None,
+) -> None:
+    import logging
+    from src.aligner import AlignmentRecord, write_records
+    from src.transcribe import QwenBatchRunner
+
+    audio = tmp_path / "audio.wav"
+    audio.touch()
+    task = TranscriptionTask(audio, tmp_path / "output.srt")
+    monkeypatch.setattr("src.transcribe.tempfile.tempdir", str(tmp_path))
+
+    def fake_stage(pending, stage, *args):
+        if failure is not None:
+            raise failure
+        for directory in pending.values():
+            write_records(
+                directory / f"{stage}.json",
+                [AlignmentRecord(segment_id="a", start=0, end=16000, text="Hello.")],
+            )
+        return pending, []
+
+    monkeypatch.setattr(QwenBatchRunner, "_validate_models", lambda *args: None)
+    monkeypatch.setattr(
+        QwenBatchRunner,
+        "_run_stage_process",
+        staticmethod(fake_stage),
+    )
+    with caplog.at_level(logging.INFO, logger="SimpleRadeonSubs"):
+        if failure is None:
+            assert QwenBatchRunner().run((task,), "en", quiet, True) == []
+        else:
+            with pytest.raises(type(failure)):
+                QwenBatchRunner().run((task,), "en", quiet, True)
+    expected = {audio}
+    if failure is None:
+        expected.add(task.output_path)
+        assert "Hello." in task.output_path.read_text()
+    assert set(tmp_path.iterdir()) == expected
+    assert "Qwen diagnostics for" not in caplog.text
+    assert ("Qwen prepare: 1 file(s)" in caplog.text) is not quiet
+
+
+def test_qwen_batch_reuses_models_and_isolates_failed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+    import src.aligner as aligner_module
+    import src.transcribe as transcribe_module
+    from src.aligner import AlignmentRecord, read_records, write_records
+
+    directories = [tmp_path / name for name in ("broken", "first", "second")]
+    for directory in directories:
+        directory.mkdir()
+    for directory in directories[1:]:
+        write_records(
+            directory / "prepare.json",
+            [
+                AlignmentRecord(segment_id="short", start=0, end=32000, text=""),
+                AlignmentRecord(segment_id="long", start=64000, end=128000, text=""),
+            ],
+        )
+    loads: list[str] = []
+    requests: list[tuple[str, list[str]]] = []
+
+    class FakeASR:
+        def __init__(self, llm) -> None:
+            loads.append("asr")
+
+        def transcribe(
+            self, records: list[AlignmentRecord], audio
+        ) -> list[AlignmentRecord]:
+            requests.append(("asr", [r.segment_id for r in records]))
+            return [r.model_copy(update={"text": "Hello."}) for r in records]
+
+    class FakeAligner:
+        def __init__(self, llm) -> None:
+            loads.append("align")
+
+        def align(self, records: list[AlignmentRecord], audio) -> list[AlignmentRecord]:
+            requests.append(("align", [r.segment_id for r in records]))
+            return records
+
+    monkeypatch.setattr(transcribe_module, "QwenASR", FakeASR)
+    monkeypatch.setattr(aligner_module, "ForcedAligner", FakeAligner)
+    monkeypatch.setattr(
+        transcribe_module.QwenWorker, "_load_model", staticmethod(lambda stage: None)
+    )
+    monkeypatch.setattr(
+        transcribe_module, "read_audio", lambda path: np.zeros(128000, dtype=np.float32)
+    )
+    inputs = [(directory / "audio.wav", directory) for directory in directories]
+    transcribe_module.QwenWorker("asr", "English", True).run(inputs)
+    transcribe_module.QwenWorker("align", "English", True).run(inputs[1:])
+    assert loads == ["asr", "align"]
+    assert requests == [
+        ("asr", ["short", "long"]),
+        ("asr", ["short", "long"]),
+        ("align", ["long"]),
+        ("align", ["long"]),
+    ]
+    assert "prepare.json" in (directories[0] / "asr.error").read_text()
+    assert read_records(directories[1] / "align.json")[0].units == ()
+    assert not list(tmp_path.rglob("*-report.json"))
+
+
+def test_qwen_short_windows_never_initialize_aligner(tmp_path: Path) -> None:
+    from src.aligner import AlignmentRecord, read_records, write_records
+    from src.transcribe import QwenBatchRunner
+
+    source = AlignmentRecord(segment_id="short", start=0, end=16000, text="Hello.")
+    write_records(
+        tmp_path / "asr.json",
+        [source],
+    )
+    task = TranscriptionTask(tmp_path / "absent.wav", tmp_path / "output.srt")
+    pending = {task: tmp_path}
+    succeeded, failures = QwenBatchRunner._run_stage_process(
+        pending, "align", None, True
+    )
+    assert succeeded == pending and failures == []
+    records = read_records(tmp_path / "align.json")
+    assert records == [source]
+    assert {p.name for p in tmp_path.iterdir()} == {"asr.json", "align.json"}
+
+
+def test_qwen_worker_crash_preserves_completed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import subprocess
+    from src.aligner import write_records
+    from src.transcribe import QwenBatchRunner, TranscriptionTask
+
+    pending = {}
+    for name in ("completed", "reported", "crashed"):
+        directory = tmp_path / name
+        directory.mkdir()
+        pending[TranscriptionTask(directory / "audio.wav", directory / "raw.srt")] = (
+            directory
+        )
+
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        parsed = json.loads(kwargs["input"])
+        assert len(parsed) == 3
+        directory = Path(parsed[0][1])
+        write_records(directory / "asr.json", [])
+        reported = Path(parsed[1][1])
+        (reported / "asr.json").write_text("partial output")
+        (reported / "asr.error").write_text("decode failed")
+        kwargs["stdout"].write(b"early detail\n" + b"x" * 10000 + b"\nfatal worker error\n")
+        return subprocess.CompletedProcess(command, 9)
+
+    monkeypatch.setattr("src.transcribe.subprocess.run", fake_run)
+    succeeded, failures = QwenBatchRunner._run_stage_process(
+        pending, "asr", None, True
+    )
+    tasks = list(pending)
+    assert list(succeeded) == tasks[:1]
+    assert [failure.task for failure in failures] == tasks[1:]
+    assert "exit 9" in failures[0].reason
+    assert "decode failed" in failures[0].reason
+    assert "fatal worker error" in failures[1].reason
+    assert "early detail" not in failures[1].reason
+    assert not list(tmp_path.rglob("*.log"))
+
+
+def test_qwen_publish_preserves_existing_srt_on_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import pysrt
+    from src.aligner import AlignmentRecord, write_records
+    from src.transcribe import TranscriptionError, TranscriptionTask, QwenBatchRunner
+
+    destination = tmp_path / "output.srt"
+    task = TranscriptionTask(tmp_path / "audio.wav", destination)
+    destination.write_text("previous result", encoding="utf-8")
+    failed = AlignmentRecord(
+        segment_id="a", start=0, end=16000, text="Partial", error="asr_truncated"
+    )
+    write_records(tmp_path / "align.json", [failed])
+    with pytest.raises(TranscriptionError, match="asr_truncated"):
+        QwenBatchRunner._publish(task, tmp_path)
+    assert destination.read_text() == "previous result"
+    complete = failed.model_copy(update={"text": "Hello.", "error": None})
+    empty = AlignmentRecord(segment_id="b", start=32000, end=64000, text="")
+    write_records(tmp_path / "align.json", [complete, empty])
+    QwenBatchRunner._publish(task, tmp_path)
+    assert pysrt.open(str(destination), encoding="utf-8")[0].text == "Hello."
+    assert "1 speech windows returned empty text" in caplog.text
+    assert {p.name for p in tmp_path.iterdir()} == {"align.json", "output.srt"}

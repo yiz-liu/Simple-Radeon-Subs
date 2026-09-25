@@ -12,7 +12,8 @@ import pysrt
 
 from src.config import TRANSLATION_MODEL_PATH
 from src.logger import logger
-from src.translation_output import _build_final_subtitles, _save_subtitles
+from src.translation_output import _build_final_subtitles
+from src.utils import save_subtitles_atomic as _save_subtitles
 from src.translation_requests import (
     TranslationOutputError,
     TranslationRequest,

@@ -8,8 +8,9 @@ The pipeline is:
 video -> FFmpeg audio extraction -> ASR -> subtitle cleanup -> translation
 ```
 
-The ASR backend is whisper.cpp built with HIP. Its built-in Silero VAD uses
-a fixed profile by default.
+Choose between whisper.cpp (the default, built with HIP) and Qwen3-ASR with
+Silero VAD and Qwen3-ForcedAligner. Both produce source-language SRT subtitles
+for the same cleanup and local translation stages.
 
 ## Requirements
 
@@ -68,15 +69,43 @@ ffmpeg -version
 ffprobe -version
 ```
 
-Prepare the full ROCm environment and the managed ASR runtime:
+Prepare the full ROCm environment:
 
 ```bash
 uv sync --locked --managed-python --group vllm
 source .venv/bin/activate
 .venv/bin/python scripts/patch_vllm.py
+```
+
+Prepare the default Whisper backend:
+
+```bash
 ./scripts/install_whisper_cli.sh
 ./scripts/download_weights.sh
 ./scripts/doctor.sh
+```
+
+Or install the Qwen dependency group and prepare its weights:
+
+```bash
+uv sync --locked --managed-python --group qwen
+source .venv/bin/activate
+./scripts/download_weights.sh --asr-backend qwen
+./scripts/doctor.sh --asr-backend qwen
+```
+
+Both download commands include the shared translation model. For Qwen ASR and
+alignment, the script runs `uvx hf download` to fetch each complete repository at
+a pinned revision into a staging directory, then verifies and installs the
+required runtime files. The Hugging Face CLI runs in
+an isolated uv tool environment; see the [official CLI guide](https://huggingface.co/docs/huggingface_hub/guides/cli#using-uv).
+Silero ONNX comes from its official release. Versions, file lists and SHA-256 hashes are defined in
+`scripts/download_weights.sh`.
+Existing files with unexpected checksums are reported without overwriting them.
+To verify Qwen weights without downloading or using the GPU:
+
+```bash
+./scripts/download_weights.sh --asr-backend qwen --check
 ```
 
 Run the minimal vLLM translation smoke test with the managed model profile:
@@ -88,14 +117,18 @@ python scripts/basic_translation.py
 `uv sync` installs the locked Python dependencies. The scripts verify the
 official vLLM wheel for WSL, build the pinned whisper.cpp CLI for the AMD
 targets reported by `rocminfo`, and download verified weights. The doctor checks
-the system tools, Python GPU stack, whisper-cli, and ASR assets; the download
-script verifies the translation model.
+the system tools, Python GPU stack and selected ASR backend. The download
+script verifies ASR assets and the shared translation model.
 
 `scripts/basic_translation.py` sends one batch of four translation requests.
 Each request contains three French subtitle lines from a public-domain classic
 and returns structured Chinese translations.
 
 ## Upgrading vLLM
+
+The `vllm` group installs vLLM for translation; `qwen` includes that group and
+adds ASR, VAD and alignment dependencies. For a Qwen environment, use
+`--group qwen` in place of `--group vllm` in the upgrade commands below.
 
 Choose a release with an official ROCm wheel compatible with the system ROCm,
 Python, and GPU. Check the [vLLM releases](https://github.com/vllm-project/vllm/releases)
@@ -155,10 +188,16 @@ python -m src.audio /path/to/video.mkv -o output.wav
 ```
 
 The output is 16 kHz, mono, 16-bit PCM WAV for downstream ASR processing.
+Extraction preserves the source audio timeline by filling timestamp gaps with
+silence. To regenerate an existing WAV, add `--force`:
+
+```bash
+python -m src.audio /path/to/video.mkv -o output.wav --force
+```
 
 ## Full Pipeline
 
-The full pipeline uses the managed whisper.cpp and local vLLM backends:
+The full pipeline uses the selected transcription backend and local vLLM translation:
 
 ```bash
 python run.py /path/to/video.mp4
@@ -167,20 +206,29 @@ python run.py /path/to/video.mp4 --keep-temp
 python run.py /path/to/video.mp4 --translated-only
 python run.py /path/to/video.mp4 --disable-vad
 python run.py /path/to/media-directory/
+python run.py /path/to/media-directory/ --asr-backend qwen --keep-temp
 ```
 
 Useful options:
 
-- `--src-lang`: source language code; whisper.cpp auto-detects it when omitted
+- `--asr-backend`: `whisper` (default) or `qwen`
+- `--src-lang`: source language code; auto-detected when omitted
 - `--keep-temp`: preserve successful per-input sidecars containing intermediate WAV and SRT files
 - `--force`: delete managed intermediates and rebuild every stage for that input
 - `--translated-only`: omit source text from the final subtitles
 - `--disable-vad`: transcribe the complete audio stream without integrated VAD
 
+Directory inputs are scanned recursively for supported video and audio files,
+including media in subdirectories. Managed sidecar directories are excluded;
+symbolic links resolving to the same source are processed once. Pass a file path
+to process only that file.
+
 Directory runs are organized by stage: FFmpeg extracts every pending input,
-whisper.cpp transcribes all pending audio files with one model load, cleanup runs
-for every transcription, and vLLM translates all prepared requests with one
-model load. Audio files and video files can be mixed in the same input tree.
+the selected backend transcribes all pending audio files, cleanup runs for every
+transcription, and vLLM translates all prepared requests with one model load.
+Whisper loads once per batch; Qwen loads ASR once, then the aligner once when
+needed. Qwen GPU workers exit before translation starts. Audio files and video
+files can be mixed in the same input tree.
 When `--output-dir` is used, the source directory layout is preserved below it.
 
 Each source uses a private sidecar beside the media file:
@@ -189,13 +237,17 @@ Each source uses a private sidecar beside the media file:
 .<source-filename>.simple-radeon-subs/
 ```
 
-Existing, up-to-date intermediate stages are reused after a failure. Successful
-jobs remove their sidecars unless `--keep-temp` is set; failed jobs retain them.
+Intermediate SRT caches are separate for each backend, source language and VAD
+mode; the extracted audio is shared. Existing, up-to-date intermediate stages
+are reused after a failure. Successful jobs remove their sidecars unless
+`--keep-temp` is set; failed jobs retain them.
 An existing final SRT always skips the input before FFmpeg or either model is
 initialized, so a successful input remains skippable after its sidecar has been
-removed. Use `--force` when fixed model settings or weights have changed and the
-result must be rebuilt. The process exits nonzero if any input fails while still
-allowing other inputs in the same batch to finish.
+removed. Use `--force` when audio extraction settings, model settings, or weights
+have changed, or when switching backends for an input that already has a final
+SRT. Final output filenames are shared between backends. The process exits
+nonzero if any input fails while still allowing other inputs in the same batch
+to finish.
 
 Translation is fully local and uses the managed model at
 `models/Qwen3.5-9B-AWQ-4bit`. The application does not send subtitle content to
@@ -227,11 +279,66 @@ python -m src.transcribe /path/to/audio.wav -o ./subs
 python -m src.transcribe /path/to/audio.wav -o ./subs -l de
 python -m src.transcribe /path/to/audio.wav -o ./subs --quiet
 python -m src.transcribe /path/to/audio.wav -o ./subs --disable-vad
+python -m src.transcribe /path/to/audio.wav -o ./subs --asr-backend qwen -l fr
 ```
 
-The command displays native transcription progress by default. `--quiet` hides
-the Python progress bar without changing transcription behavior. Full-pipeline
-directory runs submit every pending audio file to one whisper.cpp process.
+`--quiet` hides transcription progress. Qwen requires 16 kHz mono PCM16 WAV;
+use `python -m src.audio` to prepare other formats. The command writes the SRT
+to the selected output directory. Stage data is exchanged in a temporary
+directory that is cleaned up after transcription, including on failure.
+
+## Managed Qwen ASR Profile
+
+The fixed assets are `models/Qwen3-ASR-1.7B`,
+`models/Qwen3-ForcedAligner-0.6B`, and `models/silero-vad/silero_vad.onnx`.
+The managed subtitle route supports Cantonese (`yue`), Chinese (`zh`), English
+(`en`), French (`fr`), German (`de`), Italian (`it`), Japanese (`ja`), Portuguese
+(`pt`), Russian (`ru`), and Spanish (`es`). Full language names also work.
+Omitting the source language enables detection per window. Unsupported detected
+languages fail the file with an error. This list is narrower than ASR-only
+model support because subtitle timing also requires tokenization and alignment;
+Korean tokenization requires a package outside the managed runtime.
+
+The execution paths share input/output handling and separate their runtimes:
+
+```text
+Transcriber
+  whisper -> WhisperBatchRunner -> whisper-cli
+  qwen    -> QwenBatchRunner (parent)
+               prepare -> QwenWorker -> WindowPreparer (CPU)
+               asr     -> QwenWorker -> QwenASR
+               align   -> QwenWorker -> ForcedAligner
+               publish -> SRT
+```
+
+Each Qwen stage exits before the next starts. Within a stage, one worker reuses
+its model across files. Source-language parsing belongs to QwenASR; process
+launching and publication belong to QwenBatchRunner. `src/utils.py` contains the
+atomic SRT writer shared by transcription and translation.
+
+Fixed parameters live in `src/config.py`. Audio windows are built in
+`src/audio.py`, transcription is managed by `src/transcribe.py`, and alignment
+and timing rules live in `src/aligner.py`:
+
+1. Silero ONNX runs on CPU: threshold `0.01`, minimum speech `250 ms`, minimum
+   silence `100 ms`, padding `50 ms`, maximum speech `180 s`.
+2. Neighboring speech spans separated by at most `1 s` share continuous audio
+   context. Long spans are divided near low-energy points into roughly `30 s`
+   windows, preserving sample offsets. `--disable-vad` processes the entire
+   timeline through the same bounded windows.
+3. Windows up to `3 s` become one cue without alignment. Longer windows use
+   ForcedAligner; sentence-ending punctuation and semicolons determine subtitle
+   boundaries. Decimal points stay within numbers. Character count only affects
+   line wrapping, not subtitle timestamps.
+4. Valid alignment is retained and bounded to the window. Consecutive invalid
+   spans use neighboring valid cues or the window edges. Gaps below `0.32 s`
+   merge into an adjacent cue in the same window, preserving text order.
+5. Native errors and truncated ASR fail the file. Empty ASR windows produce a
+   warning. Timing fallback is an estimate and still
+   benefits from listening checks. Qwen cleanup preserves long cue durations.
+
+ASR and alignment use BF16, eager execution, model-runner V1, four concurrent
+requests, an `8192`-token context/batch budget and `0.5` GPU memory utilization.
 
 ## Subtitle Cleanup
 
@@ -248,15 +355,15 @@ effective characters, and removes text of at least 32 effective characters when
 a 2-8 character phrase repeats consecutively at least four times. Remaining
 exact repetitions of a 1-8 character unit are limited to three consecutive
 copies. Two identical consecutive cues are merged when their gap is at most 250
-ms; close runs of three or more identical cues are discarded. For VAD-derived
-subtitles, every cue longer than eight seconds keeps its end timestamp and moves
+ms; close runs of three or more identical cues are discarded. For Whisper
+VAD-derived subtitles, every cue longer than eight seconds keeps its end timestamp and moves
 its start timestamp so that only its final eight seconds remain. `--disable-vad`
 preserves long cue timestamps. Other content is preserved.
 
 ## Managed whisper.cpp ASR Profile
 
-The project intentionally exposes one fixed ASR profile rather than public
-model or device selection. Its managed assets are:
+Each backend uses a fixed profile with managed models and devices. Whisper
+assets are:
 
 ```text
 .venv/bin/whisper-cli
@@ -296,6 +403,14 @@ processed one after another by `whisper-cli` while reusing the loaded model.
 
 ## Known Issues
 
+### Long-form recognition
+
+Audio extraction preserves source timestamps, including gaps. Filling gaps can
+change Whisper decoding behavior; a long-form comparison showed substantial
+repetition with the current Whisper VAD profile. Review long-form output and
+compare the Qwen backend when this occurs. Rebuild older sidecars with `--force`
+to apply the current extraction settings.
+
 ### whisper.cpp VAD timestamps
 
 When built-in VAD removes a long silence, whisper.cpp may decode across
@@ -304,8 +419,8 @@ This is tracked upstream in
 [#3584](https://github.com/ggml-org/whisper.cpp/issues/3584) and
 [#3634](https://github.com/ggml-org/whisper.cpp/issues/3634).
 
-As a local workaround, subtitle cleanup shortens every VAD-derived cue longer
-than eight seconds to its final eight seconds while preserving the original end
+As a local workaround, subtitle cleanup shortens every Whisper VAD-derived cue
+longer than eight seconds to its final eight seconds while preserving the original end
 timestamp. Use `--disable-vad` to preserve long cue timestamps.
 
 ### whisper.cpp invalid UTF-8
@@ -319,11 +434,11 @@ position, and continues with conservative filtering.
 
 ## Development
 
-Development tools are declared in the `dev` group and are not installed by the
-default sync. Create a development environment with:
+Development tools are declared in the `dev` group. Install both transcription
+backends and the test tools with:
 
 ```bash
-uv sync --locked --managed-python --group dev --group vllm
+uv sync --locked --managed-python --group dev --group qwen
 source .venv/bin/activate
 ```
 

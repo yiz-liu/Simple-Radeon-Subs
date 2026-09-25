@@ -1,7 +1,4 @@
-import os
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 
 import pysrt
 
@@ -27,20 +24,3 @@ def _build_final_subtitles(
             )
         )
     return pysrt.SubRipFile(items=items)
-
-
-def _save_subtitles(path: Path, subtitles: pysrt.SubRipFile) -> None:
-    destination = path.resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
-    os.close(file_descriptor)
-    temporary_path = Path(temporary_name)
-    try:
-        subtitles.save(str(temporary_path), encoding="utf-8")
-        _ = temporary_path.replace(destination)
-    finally:
-        temporary_path.unlink(missing_ok=True)
