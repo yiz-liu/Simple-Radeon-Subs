@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+from contextlib import ExitStack, nullcontext
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, assert_never
+from typing import TYPE_CHECKING, Literal, TextIO, assert_never
+
+from tqdm import tqdm
 
 from src.audio import WindowPreparer, read_audio
 from src.config import (
@@ -35,7 +38,7 @@ from src.config import (
     WHISPER_VAD_MODEL_PATH,
 )
 from src.logger import logger
-from src.utils import save_subtitles_atomic
+from src.utils import inference_progress, save_subtitles_atomic
 from src.whisper_batch import (
     TranscriptionFailure,
     TranscriptionTask,
@@ -153,7 +156,7 @@ class QwenBatchRunner:
                 if not quiet:
                     logger.info("Qwen %s: %d file(s)", stage, len(pending))
                 succeeded, failed = self._run_stage_process(
-                    pending, stage, language, enable_vad
+                    pending, stage, language, enable_vad, quiet=quiet
                 )
                 pending = dict(succeeded)
                 failures.extend(failed)
@@ -194,6 +197,8 @@ class QwenBatchRunner:
         stage: QwenStage,
         language: str | None,
         enable_vad: bool,
+        *,
+        quiet: bool = False,
     ) -> tuple[Mapping[TranscriptionTask, Path], list[TranscriptionFailure]]:
         from pydantic import TypeAdapter
 
@@ -206,7 +211,14 @@ class QwenBatchRunner:
         environment = os.environ.copy()
         environment["HF_HUB_OFFLINE"] = "1"
         environment["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-        with tempfile.TemporaryFile() as handle:
+        with ExitStack() as stack:
+            handle = stack.enter_context(tempfile.TemporaryFile())
+            terminal = (
+                stack.enter_context(os.fdopen(os.dup(2), "w", encoding="utf-8"))
+                if not quiet
+                else None
+            )
+            progress_fd = terminal.fileno() if terminal is not None else -1
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -215,10 +227,12 @@ class QwenBatchRunner:
                     stage,
                     language or "",
                     "1" if enable_vad else "0",
+                    str(progress_fd),
                 ],
                 cwd=PROJECT_ROOT,
                 env=environment,
                 input=inputs,
+                pass_fds=(progress_fd,) if progress_fd >= 0 else (),
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 check=False,
@@ -284,11 +298,17 @@ class QwenWorker:
     """Own one stage's model and isolate each input failure inside the child."""
 
     def __init__(
-        self, stage: QwenStage, language: str | None, enable_vad: bool
+        self,
+        stage: QwenStage,
+        language: str | None,
+        enable_vad: bool,
+        *,
+        progress: TextIO | None = None,
     ) -> None:
         self.stage: QwenStage = stage
         self.language = language
         self.enable_vad = enable_vad
+        self.progress = progress
         self._asr: QwenASR | None = None
         self._aligner: ForcedAligner | None = None
         self._preparer: WindowPreparer | None = None
@@ -301,30 +321,49 @@ class QwenWorker:
             merge_alignments,
         )
 
-        for audio_path, directory in inputs:
-            try:
-                match self.stage:
-                    case "prepare":
-                        result = self._prepare(audio_path)
-                    case "asr":
-                        records = read_records(directory / "prepare.json")
-                        result = self._transcribe(audio_path, records)
-                    case "align":
-                        records = read_records(directory / "asr.json")
-                        active = [
-                            record for record in records if needs_alignment(record)
-                        ]
-                        result = merge_alignments(
-                            records, self._align(audio_path, active)
-                        )
-                    case unreachable:
-                        assert_never(unreachable)
-                write_records(directory / f"{self.stage}.json", result)
-            except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
-                logger.exception("Qwen %s failed for %s", self.stage, audio_path)
-                (directory / f"{self.stage}.error").write_text(
-                    str(error) or type(error).__name__, encoding="utf-8"
-                )
+        size = (
+            os.get_terminal_size(self.progress.fileno())
+            if self.progress is not None and self.progress.isatty()
+            else os.terminal_size((80, 24))
+        )
+        columns = size.columns or 80
+        with tqdm(
+            total=len(inputs),
+            desc=f"Qwen {self.stage}",
+            unit="file",
+            file=self.progress,
+            disable=self.progress is None,
+            position=0,
+            ncols=columns,
+            nrows=size.lines or 24,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}" if columns < 80 else None,
+        ) as progress:
+            for audio_path, directory in inputs:
+                try:
+                    match self.stage:
+                        case "prepare":
+                            result = self._prepare(audio_path)
+                        case "asr":
+                            records = read_records(directory / "prepare.json")
+                            result = self._transcribe(audio_path, records)
+                        case "align":
+                            records = read_records(directory / "asr.json")
+                            active = [
+                                record for record in records if needs_alignment(record)
+                            ]
+                            result = merge_alignments(
+                                records, self._align(audio_path, active)
+                            )
+                        case unreachable:
+                            assert_never(unreachable)
+                    write_records(directory / f"{self.stage}.json", result)
+                except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
+                    logger.exception("Qwen %s failed for %s", self.stage, audio_path)
+                    (directory / f"{self.stage}.error").write_text(
+                        str(error) or type(error).__name__, encoding="utf-8"
+                    )
+                finally:
+                    progress.update()
 
     def _prepare(self, audio_path: Path) -> list[AlignmentRecord]:
         from src.aligner import AlignmentRecord
@@ -349,7 +388,7 @@ class QwenWorker:
             return []
         audio = self._read_audio(audio_path, records)
         if self._asr is None:
-            self._asr = QwenASR(self._load_model("asr"))
+            self._asr = QwenASR(self._load_model("asr"), self.progress)
         return self._asr.transcribe(records, audio)
 
     def _align(
@@ -361,7 +400,7 @@ class QwenWorker:
             return []
         audio = self._read_audio(audio_path, records)
         if self._aligner is None:
-            self._aligner = ForcedAligner(self._load_model("align"))
+            self._aligner = ForcedAligner(self._load_model("align"), self.progress)
         return self._aligner.align(records, audio)
 
     @staticmethod
@@ -381,7 +420,15 @@ class QwenWorker:
             sys.stdin.buffer.read()
         )
         stage = TypeAdapter(QwenStage).validate_python(sys.argv[1])
-        QwenWorker(stage, sys.argv[2] or None, sys.argv[3] == "1").run(inputs)
+        progress_fd = int(sys.argv[4])
+        with (
+            os.fdopen(progress_fd, "w", encoding="utf-8")
+            if progress_fd >= 0
+            else nullcontext(None)
+        ) as progress:
+            QwenWorker(
+                stage, sys.argv[2] or None, sys.argv[3] == "1", progress=progress
+            ).run(inputs)
 
     @staticmethod
     def _load_model(stage: Literal["asr", "align"]) -> LLM:
@@ -410,8 +457,9 @@ class QwenWorker:
 class QwenASR:
     """Decode window text using a model owned by the current QwenWorker."""
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: LLM, progress: TextIO | None = None) -> None:
         self.llm = llm
+        self.progress = progress
 
     def transcribe(
         self,
@@ -474,7 +522,10 @@ class QwenASR:
                 max_tokens=QWEN_MAX_OUTPUT_TOKENS,
                 repetition_penalty=repetition_penalty,
             ),
-            use_tqdm=False,
+            use_tqdm=inference_progress(
+                self.progress,
+                "Qwen ASR" if repetition_penalty == 1.0 else "Qwen ASR retry",
+            ),
         )
         result: list[AlignmentRecord] = []
         for record, output in zip(records, outputs, strict=True):

@@ -229,6 +229,10 @@ transcription, and vLLM translates all prepared requests with one model load.
 Whisper loads once per batch; Qwen loads ASR once, then the aligner once when
 needed. Qwen GPU workers exit before translation starts. Audio files and video
 files can be mixed in the same input tree.
+Within each Qwen stage, files are processed sequentially with the loaded model.
+Each file submits all its ASR windows together; alignment submits all windows
+that require timestamps together. vLLM schedules up to four concurrent requests
+with an 8192-token budget per scheduling step. Retries batch only suspect windows.
 When `--output-dir` is used, the source directory layout is preserved below it.
 
 Each source uses a private sidecar beside the media file:
@@ -286,6 +290,13 @@ python -m src.transcribe /path/to/audio.wav -o ./subs --asr-backend qwen -l fr
 use `python -m src.audio` to prepare other formats. The command writes the SRT
 to the selected output directory. Stage data is exchanged in a temporary
 directory that is cleaned up after transcription, including on failure.
+
+Qwen shows a file progress bar for each stage and window progress during ASR
+and alignment. An `inputs` bar tracks request preparation; the inference bar
+counts completed audio windows, not subtitle lines or audio seconds. ASR retries
+have their own window bar, and alignment excludes short windows that use their
+existing boundaries. Model loading precedes the window bars. Progress appears
+live while native output remains captured for error reporting.
 
 ## Managed Qwen ASR Profile
 

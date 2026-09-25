@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from src.aligner import (
@@ -118,3 +120,84 @@ def test_periods_split_sentences_but_decimal_points_do_not() -> None:
         "Thank you; ",
         "Goodbye!",
     ]
+
+
+@pytest.mark.parametrize("show_progress", (False, True))
+def test_aligner_keeps_windows_batched_with_native_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_progress: bool,
+) -> None:
+    from io import StringIO
+    import json
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from unittest.mock import Mock
+    import numpy as np
+    import torch
+    from transformers.models.qwen3_asr.processing_qwen3_asr import Qwen3ASRProcessor
+    import src.aligner as module
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "timestamp_token_id": 7,
+                "timestamp_segment_time": 80,
+            }
+        )
+    )
+    monkeypatch.setattr(module, "QWEN_ALIGNER_MODEL_PATH", tmp_path)
+    processor = Mock()
+    processor.split_words_for_alignment.return_value = ["Hello"]
+    processor.decode_forced_alignment.return_value = [
+        [{"start_time": 0.0, "end_time": 1.0}]
+    ]
+    monkeypatch.setattr(
+        Qwen3ASRProcessor, "from_pretrained", lambda *a, **kw: processor
+    )
+    fake_vllm, fake_inputs = ModuleType("vllm"), ModuleType("vllm.inputs")
+    setattr(fake_vllm, "PoolingParams", SimpleNamespace)
+    setattr(fake_inputs, "TextPrompt", dict)
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.inputs", fake_inputs)
+    llm = Mock()
+    llm.encode.return_value = [
+        SimpleNamespace(
+            prompt_token_ids=[7, 7], outputs=SimpleNamespace(data=torch.zeros((2, 1)))
+        )
+        for _ in range(2)
+    ]
+    records = [
+        AlignmentRecord(
+            segment_id=str(i),
+            start=i * 80000,
+            end=(i + 1) * 80000,
+            text="Hello.",
+            language="English",
+        )
+        for i in range(2)
+    ]
+    stream = StringIO() if show_progress else None
+    results = module.ForcedAligner(llm, stream).align(
+        records, np.zeros(160000, dtype=np.float32)
+    )
+    assert [r.segment_id for r in results] == ["0", "1"]
+    assert all(r.fixed == (0.0, 1.0) for r in results)
+    llm.encode.assert_called_once()
+    assert len(llm.encode.call_args.args[0]) == 2
+    callback = llm.encode.call_args.kwargs["use_tqdm"]
+    if stream is None:
+        assert callback is False
+    else:
+        assert list(callback([1, 2], desc="Rendering prompts")) == [1, 2]
+        with callback(
+            total=2,
+            desc="Processed prompts",
+            dynamic_ncols=True,
+            postfix="native throughput",
+        ) as bar:
+            bar.update(2)
+            bar.refresh()
+        assert "Qwen align inputs" in stream.getvalue()
+        assert "Qwen align:" in stream.getvalue() and "2/2" in stream.getvalue()
+        assert "native throughput" not in stream.getvalue()

@@ -335,3 +335,20 @@ Validation passed 115 submission tests with two GPU tests excluded, plus Ruff,
 basedpyright and LSP checks. Regression coverage verifies selective single
 retries, preserved audio/language settings, ordinary repetition and early ASR
 failure after an unsuccessful retry.
+
+## 2026-09-26: show Qwen batch progress
+
+Qwen stage workers now display file progress and use vLLM's native progress
+callbacks for request preparation and completed audio windows. ASR retries
+have a separate label; alignment counts only windows that require alignment.
+A dedicated inherited terminal descriptor keeps progress visible while native
+stdout/stderr remain captured for bounded failure reporting. `--quiet` disables
+the progress channel. The callbacks do not change request batch sizes, model
+reuse, concurrency limits, timing rules or the temporary-data cleanup policy.
+
+Validation passed 126 submission tests with two GPU tests excluded, plus Ruff,
+basedpyright and LSP checks. Real PTY subprocess checks observed partial progress
+before worker exit, verified quiet mode and native-log separation, and covered
+40-column, 120-column and zero-width terminal reports (falling back to 80).
+Narrow terminals retain labels and counters while omitting timing metadata.
+GPU inference remains reserved for manual validation.

@@ -444,9 +444,11 @@ def _qwen_output(text: str, finish_reason: str = "stop") -> SimpleNamespace:
     "text,finish_reason",
     [("Partial", "length"), ("Echo!" * 25, "stop"), ("a" * 21, "stop")],
 )
+@pytest.mark.parametrize("show_progress", (False, True))
 def test_qwen_retries_only_suspect_windows_once(
-    qwen_llm: Mock, text: str, finish_reason: str
+    qwen_llm: Mock, text: str, finish_reason: str, show_progress: bool
 ) -> None:
+    from io import StringIO
     import numpy as np
     from src.aligner import AlignmentRecord
     from src.transcribe import QwenASR
@@ -471,7 +473,8 @@ def test_qwen_retries_only_suspect_windows_once(
         ],
         [_qwen_output("Bonjour.")],
     ]
-    results = QwenASR(qwen_llm).transcribe(records, audio)
+    stream = StringIO() if show_progress else None
+    results = QwenASR(qwen_llm, stream).transcribe(records, audio)
     assert [r.text for r in results] == ["Keep this.", "Bonjour.", "Last."]
     assert [(r.segment_id, r.start, r.end, r.language) for r in results] == [
         (r.segment_id, r.start, r.end, r.language) for r in records
@@ -488,6 +491,17 @@ def test_qwen_retries_only_suspect_windows_once(
         call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
         for call in (first, retry)
     )
+    for call in (first, retry):
+        callback = call.kwargs["use_tqdm"]
+        if show_progress:
+            with callback(total=len(call.args[0]), desc="Processed prompts") as bar:
+                bar.update(len(call.args[0]))
+                bar.refresh()
+        else:
+            assert callback is False
+    if stream is not None:
+        assert "Qwen ASR:" in stream.getvalue()
+        assert "Qwen ASR retry:" in stream.getvalue()
 
 
 def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
@@ -557,7 +571,7 @@ def test_qwen_batch_always_removes_temporary_state(
     task = TranscriptionTask(audio, tmp_path / "output.srt")
     monkeypatch.setattr("src.transcribe.tempfile.tempdir", str(tmp_path))
 
-    def fake_stage(pending, stage, *args):
+    def fake_stage(pending, stage, *args, quiet: bool):
         if failure is not None:
             raise failure
         for directory in pending.values():
@@ -611,7 +625,7 @@ def test_qwen_batch_reuses_models_and_isolates_failed_files(
     requests: list[tuple[str, list[str]]] = []
 
     class FakeASR:
-        def __init__(self, llm) -> None:
+        def __init__(self, llm, progress=None) -> None:
             loads.append("asr")
 
         def transcribe(
@@ -621,7 +635,7 @@ def test_qwen_batch_reuses_models_and_isolates_failed_files(
             return [r.model_copy(update={"text": "Hello."}) for r in records]
 
     class FakeAligner:
-        def __init__(self, llm) -> None:
+        def __init__(self, llm, progress=None) -> None:
             loads.append("align")
 
         def align(self, records: list[AlignmentRecord], audio) -> list[AlignmentRecord]:
@@ -671,6 +685,93 @@ def test_qwen_short_windows_never_initialize_aligner(tmp_path: Path) -> None:
     assert {p.name for p in tmp_path.iterdir()} == {"asr.json", "align.json"}
 
 
+@pytest.mark.parametrize("quiet", (False, True))
+@pytest.mark.parametrize("columns", (0, 40, 120))
+def test_qwen_progress_reaches_terminal_before_worker_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet: bool, columns: int,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import select
+    import subprocess
+    import termios
+    from time import monotonic, sleep
+    from src.transcribe import QwenBatchRunner
+
+    child = """
+import json, os, sys, time
+from contextlib import nullcontext
+from pathlib import Path
+from src.utils import inference_progress
+
+directory = Path(json.loads(sys.stdin.buffer.read())[0][1])
+fd = int(sys.argv[4])
+print('native-log-sentinel', file=sys.stderr, flush=True)
+with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
+    factory = inference_progress(terminal, 'Qwen ASR')
+    bar = factory(total=3, desc='Processed prompts', dynamic_ncols=True) if factory else None
+    if bar is not None:
+        bar.update(1)
+        bar.refresh()
+    (directory / 'ready').touch()
+    deadline = time.monotonic() + 10
+    while not (directory / 'continue').exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('progress test release timed out')
+        time.sleep(0.01)
+    if bar is not None:
+        bar.update(2)
+        bar.refresh()
+        bar.close()
+(directory / 'asr.json').write_text('[]')
+"""
+    native_run = subprocess.run
+
+    def run_child(command, **kwargs):
+        command[2] = child
+        return native_run(command, **kwargs)
+
+    monkeypatch.setattr(transcribe_module.subprocess, "run", run_child)
+    master, slave = os.openpty()
+    termios.tcsetwinsize(slave, (24, columns))
+    duplicate = os.dup
+    monkeypatch.setattr(transcribe_module.os, "dup", lambda fd: duplicate(slave))
+    task = TranscriptionTask(tmp_path / "audio.wav", tmp_path / "output.srt")
+    pending = {task: tmp_path}
+    captured = b""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                QwenBatchRunner._run_stage_process,
+                pending,
+                "asr",
+                None,
+                True,
+                quiet=quiet,
+            )
+            try:
+                deadline = monotonic() + 10
+                while not (tmp_path / "ready").exists() and monotonic() < deadline:
+                    sleep(0.01)
+                assert (tmp_path / "ready").exists()
+                assert not future.done()
+                if select.select([master], [], [], 0.1)[0]:
+                    captured += os.read(master, 65536)
+                assert (b"1/3" in captured) is not quiet
+            finally:
+                (tmp_path / "continue").touch()
+            assert future.result(timeout=10) == (pending, [])
+            while select.select([master], [], [], 0)[0]:
+                captured += os.read(master, 65536)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert b"native-log-sentinel" not in captured
+    if quiet:
+        assert captured == b""
+    else:
+        assert b"100%" in captured and b"3/3" in captured
+
+
 def test_qwen_worker_crash_preserves_completed_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -695,7 +796,9 @@ def test_qwen_worker_crash_preserves_completed_files(
         reported = Path(parsed[1][1])
         (reported / "asr.json").write_text("partial output")
         (reported / "asr.error").write_text("decode failed")
-        kwargs["stdout"].write(b"early detail\n" + b"x" * 10000 + b"\nfatal worker error\n")
+        kwargs["stdout"].write(
+            b"early detail\n" + b"x" * 10000 + b"\nfatal worker error\n"
+        )
         return subprocess.CompletedProcess(command, 9)
 
     monkeypatch.setattr("src.transcribe.subprocess.run", fake_run)

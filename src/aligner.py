@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 import unicodedata
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -15,6 +15,7 @@ from src.config import (
     QWEN_FALLBACK_MIN_SECONDS,
     QWEN_SHORT_WINDOW_SECONDS,
 )
+from src.utils import inference_progress
 
 if TYPE_CHECKING:
     import numpy as np
@@ -269,7 +270,7 @@ def render_timed_record(record: AlignmentRecord) -> list[SubtitleCue]:
 
 
 class ForcedAligner:
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: LLM, progress: TextIO | None = None) -> None:
         from transformers.models.qwen3_asr.processing_qwen3_asr import Qwen3ASRProcessor
 
         self.processor = Qwen3ASRProcessor.from_pretrained(
@@ -279,6 +280,7 @@ class ForcedAligner:
         self.timestamp_token_id = int(config["timestamp_token_id"])
         self.timestamp_segment_time = float(config["timestamp_segment_time"])
         self.llm = llm
+        self.progress = progress
 
     def align(
         self,
@@ -315,7 +317,7 @@ class ForcedAligner:
             prompts,
             pooling_task="token_classify",
             pooling_params=PoolingParams(use_activation=False),
-            use_tqdm=False,
+            use_tqdm=inference_progress(self.progress, "Qwen align"),
         )
         result: list[AlignmentRecord] = []
         for record, output in zip(prepared, outputs, strict=True):
