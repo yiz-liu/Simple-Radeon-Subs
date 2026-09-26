@@ -8,6 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+NATIVE_OUTPUT_TAIL_BYTES: Final = 8192
+
 # Audio extraction
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1
@@ -30,7 +32,6 @@ QWEN_MAX_NUM_SEQS: Final = 4
 QWEN_MAX_BATCHED_TOKENS: Final = 8192
 QWEN_MAX_OUTPUT_TOKENS: Final = 4096
 QWEN_REPETITION_PENALTY: Final = 1.2
-QWEN_ERROR_TAIL_BYTES: Final = 8192
 
 # Qwen speech detection
 QWEN_VAD_MODEL_PATH: Final = MODELS_DIR / "silero-vad" / "silero_vad.onnx"

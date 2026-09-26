@@ -126,6 +126,7 @@ def test_pipeline_batches_each_stage_and_keeps_source_paths_safe(
         desc="Extracting audio",
         unit="file",
         position=0,
+        disable=not pipeline_module.sys.stderr.isatty(),
     )
     assert extraction_progress.update.call_count == 2
     assert first.read_bytes() == b"first-source"

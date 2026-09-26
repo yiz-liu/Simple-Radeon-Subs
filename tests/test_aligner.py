@@ -123,12 +123,15 @@ def test_periods_split_sentences_but_decimal_points_do_not() -> None:
 
 
 @pytest.mark.parametrize("show_progress", (False, True))
+@pytest.mark.parametrize("interactive", (False, True))
 def test_aligner_keeps_windows_batched_with_native_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_progress: bool,
+    interactive: bool,
 ) -> None:
     from io import StringIO
+    import os
     import json
     import sys
     from types import ModuleType, SimpleNamespace
@@ -178,6 +181,12 @@ def test_aligner_keeps_windows_batched_with_native_progress(
         for i in range(2)
     ]
     stream = StringIO() if show_progress else None
+    if stream is not None:
+        monkeypatch.setattr(stream, "isatty", lambda: interactive)
+        monkeypatch.setattr(stream, "fileno", lambda: 2)
+        monkeypatch.setattr(
+            "src.utils.os.get_terminal_size", lambda fd: os.terminal_size((80, 24))
+        )
     results = module.ForcedAligner(llm, stream).align(
         records, np.zeros(160000, dtype=np.float32)
     )
@@ -186,8 +195,10 @@ def test_aligner_keeps_windows_batched_with_native_progress(
     llm.encode.assert_called_once()
     assert len(llm.encode.call_args.args[0]) == 2
     callback = llm.encode.call_args.kwargs["use_tqdm"]
-    if stream is None:
+    if stream is None or not interactive:
         assert callback is False
+        if stream is not None:
+            assert stream.getvalue() == ""
     else:
         assert list(callback([1, 2], desc="Rendering prompts")) == [1, 2]
         with callback(
@@ -198,6 +209,6 @@ def test_aligner_keeps_windows_batched_with_native_progress(
         ) as bar:
             bar.update(2)
             bar.refresh()
-        assert "Qwen align inputs" in stream.getvalue()
+        assert "inputs" not in stream.getvalue()
         assert "Qwen align:" in stream.getvalue() and "2/2" in stream.getvalue()
         assert "native throughput" not in stream.getvalue()

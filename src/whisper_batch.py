@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import ExitStack
 from collections import deque
@@ -221,7 +222,7 @@ class WhisperBatchRunner:
             total=100 * task_count,
             desc="Transcribing",
             unit="%",
-            disable=quiet,
+            disable=quiet or not sys.stderr.isatty(),
             ncols=terminal_size.columns or 80,
             nrows=terminal_size.lines or 24,
         ) as progress:

@@ -3,6 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
+from typing import TextIO
 from unittest.mock import MagicMock
 
 import pysrt
@@ -30,6 +31,8 @@ class FakeBatchTranslator(VLLMTranslator):
         self,
         requests: Sequence[TranslationRequest],
         target_lang: str,
+        *,
+        progress: TextIO | None,
     ) -> list[InferenceResult]:
         self.inference_calls += 1
         outputs: list[InferenceResult] = []
@@ -208,7 +211,7 @@ def test_run_inference_caps_each_translation_at_2048_tokens(
     monkeypatch.setattr(translator, "_load_engine", lambda: fake_llm)
 
     # When: The request is prepared for vLLM inference.
-    outputs = translator._run_inference((request,), "Chinese")
+    outputs = translator._run_inference((request,), "Chinese", progress=None)
 
     # Then: Its generation budget is capped without changing request batching.
     sampling_params = fake_llm.chat.call_args.kwargs["sampling_params"]
@@ -253,7 +256,7 @@ def test_shared_srt_writer_keeps_existing_output_when_save_fails(
 
 @pytest.mark.parametrize("backend", ("translation", "asr", "align"))
 @pytest.mark.parametrize("failure", (False, True))
-def test_native_logging_keeps_warnings_and_errors_without_initialization_noise(
+def test_native_logging_buffers_warnings_until_failure(
     tmp_path: Path, backend: str, failure: bool
 ) -> None:
     import os
@@ -264,7 +267,7 @@ def test_native_logging_keeps_warnings_and_errors_without_initialization_noise(
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-import vllm
+from src.logger import native_output
 
 def load_model(**kwargs):
     from vllm.logger import init_logger
@@ -282,13 +285,15 @@ def load_model(**kwargs):
             raise
     return SimpleNamespace()
 
-vllm.LLM = load_model
-if sys.argv[1] == 'translation':
-    from src.translation import VLLMTranslator
-    VLLMTranslator(Path(sys.argv[2]))._load_engine()
-else:
-    from src.transcribe import QwenWorker
-    QwenWorker._load_model(sys.argv[1])
+with native_output('Model initialization'):
+    import vllm
+    vllm.LLM = load_model
+    if sys.argv[1] == 'translation':
+        from src.translation import VLLMTranslator
+        VLLMTranslator(Path(sys.argv[2]))._load_engine()
+    else:
+        from src.transcribe import QwenWorker
+        QwenWorker._load_model(sys.argv[1])
 """
     environment = os.environ.copy()
     environment.pop("VLLM_LOGGING_LEVEL", None)
@@ -304,14 +309,169 @@ else:
         timeout=30,
     )
 
-    # Then: Warning/error details survive; initialization noise stays hidden.
+    # Then: Native warnings are buffered on success and included once on failure.
     output = completed.stdout + completed.stderr
     assert "native-info-sentinel" not in output
     assert "native-debug-sentinel" not in output
     assert "weight-progress-sentinel" not in output
-    assert "native-warning-sentinel" in completed.stderr
+    assert completed.stderr.count("native-warning-sentinel") == int(failure)
     assert (completed.returncode != 0) is failure
     if failure:
         assert "native-error-sentinel" in completed.stderr
         assert "RuntimeError: native-failure-detail" in completed.stderr
         assert "Traceback" in completed.stderr
+
+
+@pytest.mark.parametrize("failure", ("none", "output", "exception"))
+def test_translation_captures_native_lifecycle_and_restores_output(
+    tmp_path: Path, failure: str
+) -> None:
+    import subprocess
+
+    script = r"""
+import ctypes
+import os
+import subprocess
+import sys
+from pathlib import Path
+from src.logger import logger
+from src.translation import VLLMTranslator, InferenceResult, TranslationTask
+
+class Translator(VLLMTranslator):
+    def _run_inference(self, requests, target_lang, *, progress):
+        logger.warning('project-warning-sentinel')
+        print('native-stdout-sentinel', flush=True)
+        ctypes.CDLL(None).printf(b'native-c-stdout-sentinel\n')
+        os.write(2, b'native-fd-sentinel\n')
+        subprocess.run([sys.executable, '-c', "print('native-child-sentinel')"], check=True)
+        if sys.argv[2] == 'exception':
+            raise RuntimeError('inference failed')
+        return [InferenceResult('invalid' if sys.argv[2] == 'output' else '{"1":"ok"}', 'stop')]
+
+    def _release_engine(self):
+        os.write(2, b'native-release-sentinel\n')
+
+root = Path(sys.argv[1])
+source = root / 'input.srt'
+source.write_text('1\n00:00:01,000 --> 00:00:02,000\nsource\n\n')
+translator = Translator(root)
+ctypes.CDLL(None).printf(b'before-native-context\n')
+try:
+    failures = translator.translate_many([TranslationTask(source, root / 'output.srt')])
+    assert bool(failures) == (sys.argv[2] == 'output')
+except RuntimeError:
+    assert sys.argv[2] == 'exception'
+print('restored-stdout')
+os.write(2, b'restored-stderr\n')
+logger.info('restored-project')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), failure],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    output = completed.stdout + completed.stderr
+    assert output.count("project-warning-sentinel") == 1
+    for marker in ("stdout", "c-stdout", "fd", "child", "release"):
+        assert output.count(f"native-{marker}-sentinel") == int(failure != "none")
+    assert output.count("native diagnostics") == int(failure != "none")
+    assert "restored-stdout" in completed.stdout
+    assert "before-native-context" in completed.stdout
+    assert "native-c-stdout-sentinel" not in completed.stdout
+    assert "restored-stderr" in completed.stderr
+    assert "restored-project" in completed.stderr
+    assert "\r" not in output and "\x1b" not in output
+
+
+def test_native_capture_leaves_other_c_streams_buffered(tmp_path: Path) -> None:
+    import subprocess
+
+    script = r"""
+import ctypes
+import os
+import sys
+from pathlib import Path
+from src.logger import native_output
+
+libc = ctypes.CDLL(None)
+libc.fopen.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+libc.fopen.restype = ctypes.c_void_p
+libc.fputs.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+libc.fclose.argtypes = [ctypes.c_void_p]
+path = Path(sys.argv[1])
+stream = libc.fopen(os.fsencode(path), b'w')
+assert stream
+try:
+    assert libc.fputs(b'owned by another module', stream) >= 0
+    assert path.stat().st_size == 0
+    with native_output('Inference'):
+        assert path.stat().st_size == 0
+    assert path.stat().st_size == 0
+finally:
+    assert libc.fclose(stream) == 0
+assert path.read_text() == 'owned by another module'
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "other.txt")],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("outcome", ("success", "error", "cancel"))
+def test_native_flush_failure_preserves_inference_outcome(outcome: str) -> None:
+    import subprocess
+
+    script = r"""
+import ctypes
+import os
+import sys
+from src.logger import logger, native_output
+
+libc = ctypes.CDLL(None)
+libc.setvbuf.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
+stdout = ctypes.c_void_p.in_dll(libc, 'stdout')
+assert libc.setvbuf(stdout, None, 0, 4096) == 0
+original = {
+    'success': None,
+    'error': RuntimeError('inference-failure'),
+    'cancel': KeyboardInterrupt('inference-cancelled'),
+}[sys.argv[1]]
+try:
+    with native_output('Inference'):
+        os.write(2, b'captured-native-detail\n')
+        with open('/dev/full', 'wb', buffering=0) as full:
+            os.dup2(full.fileno(), 1)
+        assert libc.printf(b'buffered-native-output') > 0
+        if original is not None:
+            raise original
+except (RuntimeError, KeyboardInterrupt) as error:
+    assert error is original
+    print(str(error))
+else:
+    assert original is None
+print('stdout-restored')
+os.write(2, b'stderr-restored\n')
+logger.info('project-restored')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, outcome],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert "stdout-restored" in completed.stdout
+    assert "stderr-restored" in completed.stderr
+    assert "project-restored" in completed.stderr
+    assert completed.stderr.count("Unable to flush Inference diagnostics") == 1
+    assert completed.stderr.count("captured-native-detail") == int(outcome != "success")
+    if outcome != "success":
+        assert (
+            f"inference-{'failure' if outcome == 'error' else 'cancelled'}"
+            in completed.stdout
+        )

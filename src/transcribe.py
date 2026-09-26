@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from contextlib import ExitStack, nullcontext
 import os
 import subprocess
 import sys
@@ -33,12 +32,16 @@ from src.config import (
     QWEN_MAX_BATCHED_TOKENS,
     QWEN_MAX_OUTPUT_TOKENS,
     QWEN_REPETITION_PENALTY,
-    QWEN_ERROR_TAIL_BYTES,
     WHISPER_CLI_PATH,
     WHISPER_MODEL_PATH,
     WHISPER_VAD_MODEL_PATH,
 )
-from src.logger import configure_vllm_logging, logger
+from src.logger import (
+    configure_vllm_logging,
+    logger,
+    native_output_tail,
+    project_output,
+)
 from src.utils import inference_progress, save_subtitles_atomic
 from src.whisper_batch import (
     TranscriptionFailure,
@@ -211,14 +214,11 @@ class QwenBatchRunner:
         environment = os.environ.copy()
         environment["HF_HUB_OFFLINE"] = "1"
         environment["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-        with ExitStack() as stack:
-            handle = stack.enter_context(tempfile.TemporaryFile())
-            terminal = (
-                stack.enter_context(os.fdopen(os.dup(2), "w", encoding="utf-8"))
-                if not quiet
-                else None
-            )
-            progress_fd = terminal.fileno() if terminal is not None else -1
+        with (
+            tempfile.TemporaryFile() as handle,
+            os.fdopen(os.dup(2), "w", encoding="utf-8") as terminal,
+        ):
+            output_fd = terminal.fileno()
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -227,18 +227,18 @@ class QwenBatchRunner:
                     stage,
                     language or "",
                     "1" if enable_vad else "0",
-                    str(progress_fd),
+                    str(output_fd),
+                    "0" if quiet else "1",
                 ],
                 cwd=PROJECT_ROOT,
                 env=environment,
                 input=inputs,
-                pass_fds=(progress_fd,) if progress_fd >= 0 else (),
+                pass_fds=(output_fd,),
                 stdout=handle,
-                stderr=None,
+                stderr=subprocess.STDOUT,
                 check=False,
             )
-            handle.seek(max(0, handle.tell() - QWEN_ERROR_TAIL_BYTES))
-            error_tail = handle.read().decode("utf-8", errors="replace").strip()
+            error_tail = native_output_tail(handle)
         succeeded: dict[TranscriptionTask, Path] = {}
         failures: list[TranscriptionFailure] = []
         missing_records = 0
@@ -261,6 +261,8 @@ class QwenBatchRunner:
             if error_tail:
                 detail += f"\nWorker output tail:\n{error_tail}"
             logger.error("%s", detail)
+        elif failures and error_tail:
+            logger.warning("Qwen %s runtime diagnostics:\n%s", stage, error_tail)
         return succeeded, failures
 
     @staticmethod
@@ -327,24 +329,34 @@ class QwenWorker:
             merge_alignments,
         )
 
+        interactive = self.progress is not None and self.progress.isatty()
         size = (
             os.get_terminal_size(self.progress.fileno())
-            if self.progress is not None and self.progress.isatty()
+            if self.progress is not None and interactive
             else os.terminal_size((80, 24))
         )
         columns = size.columns or 80
+        succeeded = 0
         with tqdm(
             total=len(inputs),
             desc=f"Qwen {self.stage}",
             unit="file",
             file=self.progress,
-            disable=self.progress is None,
+            disable=not interactive,
             position=0,
             ncols=columns,
             nrows=size.lines or 24,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}" if columns < 80 else None,
         ) as progress:
-            for audio_path, directory in inputs:
+            for index, (audio_path, directory) in enumerate(inputs, 1):
+                if self.progress is not None and not interactive:
+                    logger.info(
+                        "Qwen %s: file %d/%d (%s)",
+                        self.stage,
+                        index,
+                        len(inputs),
+                        audio_path,
+                    )
                 try:
                     match self.stage:
                         case "prepare":
@@ -363,6 +375,7 @@ class QwenWorker:
                         case unreachable:
                             assert_never(unreachable)
                     write_records(directory / f"{self.stage}.json", result)
+                    succeeded += 1
                 except TranscriptionError as error:
                     (directory / f"{self.stage}.error").write_text(
                         str(error), encoding="utf-8"
@@ -373,6 +386,13 @@ class QwenWorker:
                     )
                 finally:
                     progress.update()
+        if self.progress is not None and not interactive:
+            logger.info(
+                "Qwen %s complete: %d succeeded, %d failed.",
+                self.stage,
+                succeeded,
+                len(inputs) - succeeded,
+            )
 
     def _prepare(self, audio_path: Path) -> list[AlignmentRecord]:
         from src.aligner import AlignmentRecord
@@ -397,6 +417,8 @@ class QwenWorker:
             return []
         audio = self._read_audio(audio_path, records)
         if self._asr is None:
+            if self.progress is not None:
+                logger.info("Loading Qwen ASR model...")
             self._asr = QwenASR(self._load_model("asr"), self.progress)
         return self._asr.transcribe(records, audio)
 
@@ -409,6 +431,8 @@ class QwenWorker:
             return []
         audio = self._read_audio(audio_path, records)
         if self._aligner is None:
+            if self.progress is not None:
+                logger.info("Loading Qwen alignment model...")
             self._aligner = ForcedAligner(self._load_model("align"), self.progress)
         return self._aligner.align(records, audio)
 
@@ -429,14 +453,13 @@ class QwenWorker:
             sys.stdin.buffer.read()
         )
         stage = TypeAdapter(QwenStage).validate_python(sys.argv[1])
-        progress_fd = int(sys.argv[4])
-        with (
-            os.fdopen(progress_fd, "w", encoding="utf-8")
-            if progress_fd >= 0
-            else nullcontext(None)
-        ) as progress:
+        output_fd = int(sys.argv[4])
+        with os.fdopen(output_fd, "w", encoding="utf-8") as output, project_output(output):
             QwenWorker(
-                stage, sys.argv[2] or None, sys.argv[3] == "1", progress=progress
+                stage,
+                sys.argv[2] or None,
+                sys.argv[3] == "1",
+                progress=output if sys.argv[5] == "1" else None,
             ).run(inputs)
 
     @staticmethod

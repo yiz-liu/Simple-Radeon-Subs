@@ -6,13 +6,14 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TextIO
 
 import pysrt
 
 from src.config import TRANSLATION_MODEL_PATH
-from src.logger import configure_vllm_logging, logger
+from src.logger import configure_vllm_logging, logger, native_output
 from src.translation_output import _build_final_subtitles
+from src.utils import inference_progress
 from src.utils import save_subtitles_atomic as _save_subtitles
 from src.translation_requests import (
     TranslationOutputError,
@@ -111,44 +112,56 @@ class VLLMTranslator:
             len(requests),
             self.model_path.name,
         )
-        try:
-            outputs = self._run_inference(requests, options.target_lang)
-            results: list[list[TranslationResult]] = [[] for _ in pending]
-            reasons: dict[int, str] = {}
-            for request, output, owner in zip(requests, outputs, owners, strict=True):
-                if owner in reasons:
-                    continue
-                try:
-                    results[owner].append(self._parse_output(request, output))
-                except TranslationOutputError as error:
-                    reasons[owner] = str(error)
+        with native_output("Translation") as diagnostics:
+            initial_failures = len(failures)
+            try:
+                outputs = self._run_inference(
+                    requests, options.target_lang, progress=diagnostics.stream
+                )
+                results: list[list[TranslationResult]] = [[] for _ in pending]
+                reasons: dict[int, str] = {}
+                for request, output, owner in zip(
+                    requests, outputs, owners, strict=True
+                ):
+                    if owner in reasons:
+                        continue
+                    try:
+                        results[owner].append(self._parse_output(request, output))
+                    except TranslationOutputError as error:
+                        reasons[owner] = str(error)
 
-            for index, item in enumerate(pending):
-                reason = reasons.get(index)
-                if reason is not None:
-                    failures.append(TranslationFailure(item.task, reason))
-                    continue
-                try:
-                    translations = self._reassemble_subtitles(
-                        len(item.subtitles),
-                        results[index],
-                    )
-                    final = _build_final_subtitles(
-                        item.subtitles,
-                        translations,
-                        options.translated_only,
-                    )
-                    _save_subtitles(item.task.output_path, final)
-                except (
-                    OSError,
-                    UnicodeError,
-                    pysrt.Error,
-                    TranslationOutputError,
-                ) as error:
-                    failures.append(TranslationFailure(item.task, str(error)))
-            return failures
-        finally:
-            self._release_engine()
+                for index, item in enumerate(pending):
+                    reason = reasons.get(index)
+                    if reason is not None:
+                        failures.append(TranslationFailure(item.task, reason))
+                        continue
+                    try:
+                        translations = self._reassemble_subtitles(
+                            len(item.subtitles),
+                            results[index],
+                        )
+                        final = _build_final_subtitles(
+                            item.subtitles,
+                            translations,
+                            options.translated_only,
+                        )
+                        _save_subtitles(item.task.output_path, final)
+                    except (
+                        OSError,
+                        UnicodeError,
+                        pysrt.Error,
+                        TranslationOutputError,
+                    ) as error:
+                        failures.append(TranslationFailure(item.task, str(error)))
+                diagnostics.failed = len(failures) > initial_failures
+                logger.info(
+                    "Translation complete: %d succeeded, %d failed.",
+                    len(tasks) - len(failures),
+                    len(failures),
+                )
+                return failures
+            finally:
+                self._release_engine()
 
     def translate_srt(
         self,
@@ -176,6 +189,8 @@ class VLLMTranslator:
         self,
         requests: Sequence[TranslationRequest],
         target_lang: str,
+        *,
+        progress: TextIO | None,
     ) -> list[InferenceResult]:
         llm = self._load_engine()
         from vllm import SamplingParams
@@ -195,11 +210,14 @@ class VLLMTranslator:
             )
             for request in requests
         ]
+        logger.info("Translating %d requests...", len(requests))
         raw_outputs = llm.chat(
             [request.messages(target_lang) for request in requests],
             sampling_params=sampling_params,
             chat_template_kwargs={"enable_thinking": False},
-            use_tqdm=True,
+            use_tqdm=inference_progress(
+                progress, "Translation requests", position=0, unit="request"
+            ),
         )
         return [
             InferenceResult(
@@ -216,9 +234,9 @@ class VLLMTranslator:
             return self._llm
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         configure_vllm_logging()
+        logger.info("Loading translation model: %s", self.model_path.name)
         from vllm import LLM
 
-        logger.info("Loading vLLM model: %s", self.model_path.name)
         self._llm = LLM(
             model=str(self.model_path),
             use_tqdm_on_load=False,

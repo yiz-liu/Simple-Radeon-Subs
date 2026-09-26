@@ -6,6 +6,7 @@ import math
 import wave
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -123,7 +124,7 @@ class AudioExtractor:
             return output_file
 
         duration = self.get_duration(input_file)
-        if progress_position is None:
+        if progress_position is None or not sys.stderr.isatty():
             logger.info("Extracting optimized audio: %s", input_file.name)
 
         # Construct FFmpeg command
@@ -167,6 +168,7 @@ class AudioExtractor:
                     else f"Current file: {input_file.name}"
                 ),
                 unit="s",
+                disable=not sys.stderr.isatty(),
                 position=progress_position or 0,
                 leave=progress_position is None,
                 bar_format=(
@@ -200,6 +202,8 @@ class AudioExtractor:
                 f"FFmpeg failed to extract audio (code {return_code})."
             )
 
+        if not sys.stderr.isatty():
+            logger.info("Audio extracted: %s", input_file.name)
         return output_file
 
 

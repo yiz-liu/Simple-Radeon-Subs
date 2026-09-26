@@ -1,5 +1,6 @@
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -153,6 +154,7 @@ def run_pipeline(
             desc="Extracting audio",
             unit="file",
             position=0,
+            disable=not sys.stderr.isatty(),
         ) as extraction_progress:
             for job in extraction_jobs:
                 try:

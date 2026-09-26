@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import sys
 from typing import Final
 from unittest.mock import MagicMock
 import wave
@@ -132,6 +133,7 @@ def test_extract_uses_a_reusable_nested_progress_line(
     progress_options = progress_factory.call_args.kwargs
     assert progress_options["desc"] == f"Current file: {EXAMPLE_VIDEO.name}"
     assert progress_options["unit"] == "s"
+    assert progress_options["disable"] is (not sys.stderr.isatty())
     assert progress_options["position"] == 1
     assert progress_options["leave"] is False
 

@@ -188,14 +188,17 @@ def test_transcribe_passes_an_explicit_language_and_overwrites_on_success(
 
 
 @pytest.mark.parametrize("quiet", (False, True))
+@pytest.mark.parametrize("interactive", (False, True))
 def test_transcribe_reports_only_monotonic_valid_progress(
     fake_runtime: FakeRuntime,
     monkeypatch: pytest.MonkeyPatch,
     quiet: bool,
+    interactive: bool,
 ) -> None:
     # Given: Native progress containing noise, overflow, and a regression.
     RecordingProgress.instances.clear()
     monkeypatch.setattr(whisper_batch_module, "tqdm", RecordingProgress)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: interactive)
     monkeypatch.setenv(
         "FAKE_PROGRESS",
         "|".join(
@@ -215,7 +218,7 @@ def test_transcribe_reports_only_monotonic_valid_progress(
 
     # Then: Display advances monotonically while quiet changes only its visibility.
     assert RecordingProgress.instances[-1].updates == [10, 50, 40]
-    assert RecordingProgress.instances[-1].disable is quiet
+    assert RecordingProgress.instances[-1].disable is (quiet or not interactive)
 
 
 def test_transcribe_progress_is_visible_in_a_zero_width_pty(
@@ -494,14 +497,9 @@ def test_qwen_invalid_window_fails_without_resubmitting_the_batch(
     assert call.args[1].repetition_penalty == 1.2
     assert call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
     callback = call.kwargs["use_tqdm"]
-    if show_progress:
-        with callback(total=len(call.args[0]), desc="Processed prompts") as bar:
-            bar.update(len(call.args[0]))
-            bar.refresh()
-    else:
-        assert callback is False
+    assert callback is False
     if stream is not None:
-        assert "Qwen ASR:" in stream.getvalue()
+        assert stream.getvalue() == ""
 
 
 def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
@@ -603,8 +601,11 @@ def test_qwen_batch_always_removes_temporary_state(
 
 
 def test_qwen_batch_reuses_models_and_isolates_failed_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from io import StringIO
     import numpy as np
     import src.aligner as aligner_module
     import src.transcribe as transcribe_module
@@ -651,8 +652,13 @@ def test_qwen_batch_reuses_models_and_isolates_failed_files(
         transcribe_module, "read_audio", lambda path: np.zeros(128000, dtype=np.float32)
     )
     inputs = [(directory / "audio.wav", directory) for directory in directories]
-    transcribe_module.QwenWorker("asr", "English", True).run(inputs)
-    transcribe_module.QwenWorker("align", "English", True).run(inputs[1:])
+    with caplog.at_level("INFO", logger="SimpleRadeonSubs"):
+        transcribe_module.QwenWorker(
+            "asr", "English", True, progress=StringIO()
+        ).run(inputs)
+        transcribe_module.QwenWorker(
+            "align", "English", True, progress=StringIO()
+        ).run(inputs[1:])
     assert loads == ["asr", "align"]
     assert requests == [
         ("asr", ["short", "long"]),
@@ -662,6 +668,10 @@ def test_qwen_batch_reuses_models_and_isolates_failed_files(
     ]
     assert "prepare.json" in (directories[0] / "asr.error").read_text()
     assert read_records(directories[1] / "align.json")[0].units == ()
+    assert caplog.text.count("Loading Qwen ASR model...") == 1
+    assert caplog.text.count("Loading Qwen alignment model...") == 1
+    assert "Qwen asr complete: 2 succeeded, 1 failed." in caplog.text
+    assert "Qwen align complete: 2 succeeded, 0 failed." in caplog.text
     assert not list(tmp_path.rglob("*-report.json"))
 
 
@@ -699,21 +709,24 @@ def test_qwen_progress_reaches_terminal_before_worker_exits(
 
     child = """
 import json, logging, os, sys, time
-from contextlib import nullcontext
 from pathlib import Path
+from src.logger import logger, project_output
 from src.utils import inference_progress
 
 directory = Path(json.loads(sys.stdin.buffer.read())[0][1])
 fd = int(sys.argv[4])
 print('native-log-sentinel', flush=True)
 logging.basicConfig(level=logging.WARNING)
-logging.warning('native-warning-sentinel')
-with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
-    factory = inference_progress(terminal, 'Qwen ASR')
+with os.fdopen(fd, 'w') as terminal, project_output(terminal):
+    factory = inference_progress(terminal if sys.argv[5] == '1' else None, 'Qwen ASR')
     bar = factory(total=3, desc='Processed prompts', dynamic_ncols=True) if factory else None
     if bar is not None:
         bar.update(1)
         bar.refresh()
+    for index in range(100):
+        logging.warning('native-warning-sentinel-%s', index)
+        os.write(2, f'native-fd-sentinel-{index}\\n'.encode())
+    logger.warning('project-warning-sentinel')
     (directory / 'ready').touch()
     deadline = time.monotonic() + 10
     while not (directory / 'continue').exists():
@@ -760,7 +773,9 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
                 assert not future.done()
                 if select.select([master], [], [], 0.1)[0]:
                     captured += os.read(master, 65536)
-                assert b"native-warning-sentinel" in captured
+                assert b"native-warning-sentinel" not in captured
+                assert b"native-fd-sentinel" not in captured
+                assert captured.count(b"project-warning-sentinel") == 1
                 assert (b"1/3" in captured) is not quiet
             finally:
                 (tmp_path / "continue").touch()
@@ -771,10 +786,68 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
         os.close(master)
         os.close(slave)
     assert b"native-log-sentinel" not in captured
+    assert b"native-warning-sentinel" not in captured
+    assert b"native-fd-sentinel" not in captured
+    assert captured.count(b"project-warning-sentinel") == 1
     if quiet:
         assert b"Qwen ASR" not in captured
     else:
         assert b"100%" in captured and b"3/3" in captured
+
+
+@pytest.mark.parametrize("quiet", (False, True))
+def test_qwen_pipe_shows_status_without_terminal_control_sequences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quiet: bool,
+) -> None:
+    import subprocess
+    import tempfile
+    from src.transcribe import QwenBatchRunner
+
+    pending = {}
+    for index in range(2):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        task = TranscriptionTask(directory / "audio.wav", directory / "raw.srt")
+        pending[task] = directory
+    native_run = subprocess.run
+
+    def run_child(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        command[2] = """
+import os
+from src.logger import logger
+from src.transcribe import QwenWorker
+
+def prepare(self, audio_path):
+    print('native-stdout-sentinel', flush=True)
+    os.write(2, b'native-stderr-sentinel\\n')
+    logger.warning('project-warning: %s', audio_path.parent.name)
+    return []
+
+QwenWorker._prepare = prepare
+QwenWorker.main()
+"""
+        return native_run(command, **kwargs)
+
+    monkeypatch.setattr(transcribe_module.subprocess, "run", run_child)
+    duplicate = os.dup
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output:
+        monkeypatch.setattr(
+            transcribe_module.os, "dup", lambda fd: duplicate(output.fileno())
+        )
+        succeeded, failures = QwenBatchRunner._run_stage_process(
+            pending, "prepare", None, True, quiet=quiet
+        )
+        output.seek(0)
+        rendered = output.read()
+    assert succeeded == pending and failures == []
+    assert "native-" not in rendered
+    assert rendered.count("project-warning:") == 2
+    assert "\r" not in rendered and "\x1b" not in rendered
+    assert ("file 1/2" in rendered) is not quiet
+    assert ("file 2/2" in rendered) is not quiet
+    assert ("2 succeeded, 0 failed" in rendered) is not quiet
 
 
 @pytest.mark.parametrize("caller", ("pipeline", "cli"))
@@ -783,6 +856,7 @@ def test_qwen_file_failures_are_reported_once_by_the_public_caller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
     caller: str,
     unexpected: bool,
 ) -> None:
@@ -798,10 +872,16 @@ def test_qwen_file_failures_are_reported_once_by_the_public_caller(
 
     def failing_worker(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
         command[2] = """
+import logging
+from src.logger import logger
 from src.transcribe import QwenWorker, TranscriptionError
+
+logging.basicConfig(level=logging.WARNING)
 
 def fail(self, audio_path):
     marker = audio_path.stem if audio_path.stem != 'audio' else audio_path.parent.name
+    print(f'native-detail: {marker}', flush=True)
+    logger.warning('business-warning: %s', marker)
     detail = f'{marker}-failure: w00001 (1.000-2.000 s): asr_truncated'
     if UNEXPECTED:
         try:
@@ -843,6 +923,15 @@ QwenWorker.main()
         assert ("native-cause" in message) is unexpected
         assert "Worker output tail" not in message
         assert "exit 0" not in message
+    diagnostics = [
+        record.getMessage()
+        for record in caplog.records
+        if "runtime diagnostics" in record.getMessage()
+    ]
+    assert len(diagnostics) == (1 if caller == "pipeline" else 2)
+    assert sum(message.count("native-detail:") for message in diagnostics) == 2
+    assert all("business-warning:" not in message for message in diagnostics)
+    assert capfd.readouterr().err.count("business-warning:") == 2
 
 
 @pytest.mark.parametrize("returncode", (0, 9))
@@ -905,9 +994,10 @@ sys.exit(RETURN_CODE)
         assert errors[0].count("fatal worker error") == 1
         assert "early detail" not in errors[0]
         assert "decode failed" not in errors[0]
+        assert errors[0].count("native-stderr-failure") == 1
     else:
         assert errors == []
-    assert "native-stderr-failure" in capfd.readouterr().err
+    assert "native-stderr-failure" not in capfd.readouterr().err
     assert not list(tmp_path.rglob("*.log"))
 
 

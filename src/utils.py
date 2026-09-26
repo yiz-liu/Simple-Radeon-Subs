@@ -11,10 +11,10 @@ from tqdm.auto import tqdm
 
 
 def inference_progress(
-    stream: TextIO | None, label: str
+    stream: TextIO | None, label: str, *, position: int = 1, unit: str = "window"
 ) -> bool | Callable[..., tqdm[object]]:
     """Render vLLM's request progress separately from its native output."""
-    if stream is None:
+    if stream is None or not stream.isatty():
         return False
 
     def create_bar(
@@ -34,10 +34,11 @@ def inference_progress(
         return tqdm(
             iterable,
             total=total,
-            desc=label + (" inputs" if desc.startswith("Rendering") else ""),
-            unit="window",
+            desc=label,
+            unit=unit,
             file=stream,
-            position=1,
+            position=position,
+            disable=desc.startswith("Rendering"),
             leave=False,
             ncols=columns,
             nrows=size.lines or 24,
