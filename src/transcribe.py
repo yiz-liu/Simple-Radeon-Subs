@@ -32,7 +32,7 @@ from src.config import (
     QWEN_MAX_NUM_SEQS,
     QWEN_MAX_BATCHED_TOKENS,
     QWEN_MAX_OUTPUT_TOKENS,
-    QWEN_RETRY_REPETITION_PENALTY,
+    QWEN_REPETITION_PENALTY,
     QWEN_ERROR_TAIL_BYTES,
     WHISPER_CLI_PATH,
     WHISPER_MODEL_PATH,
@@ -479,16 +479,7 @@ class QwenASR:
     ) -> list[AlignmentRecord]:
         if not records:
             return []
-        result = self._generate(records, audio, repetition_penalty=1.0)
-        suspect = [i for i, record in enumerate(result) if record.error]
-        if suspect:
-            retried = self._generate(
-                [records[i] for i in suspect],
-                audio,
-                repetition_penalty=QWEN_RETRY_REPETITION_PENALTY,
-            )
-            for index, record in zip(suspect, retried, strict=True):
-                result[index] = record
+        result = self._generate(records, audio)
         errors = [
             f"{r.segment_id} ({r.start / AUDIO_SAMPLE_RATE:.3f}-"
             f"{r.end / AUDIO_SAMPLE_RATE:.3f} s): {r.error}"
@@ -496,14 +487,13 @@ class QwenASR:
             if r.error
         ]
         if errors:
-            raise TranscriptionError("ASR failed after one retry: " + "; ".join(errors))
+            raise TranscriptionError("ASR failed: " + "; ".join(errors))
         return result
 
     def _generate(
         self,
         records: list[AlignmentRecord],
         audio: NDArray[np.float32],
-        repetition_penalty: float,
     ) -> list[AlignmentRecord]:
         from transformers.models.qwen3_asr.processing_qwen3_asr import (
             _detect_and_fix_repetitions,
@@ -531,12 +521,9 @@ class QwenASR:
             SamplingParams(
                 temperature=0,
                 max_tokens=QWEN_MAX_OUTPUT_TOKENS,
-                repetition_penalty=repetition_penalty,
+                repetition_penalty=QWEN_REPETITION_PENALTY,
             ),
-            use_tqdm=inference_progress(
-                self.progress,
-                "Qwen ASR" if repetition_penalty == 1.0 else "Qwen ASR retry",
-            ),
+            use_tqdm=inference_progress(self.progress, "Qwen ASR"),
         )
         result: list[AlignmentRecord] = []
         for record, output in zip(records, outputs, strict=True):

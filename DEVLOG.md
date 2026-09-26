@@ -390,3 +390,40 @@ stderr remains live, and file/window progress is unchanged.
 CPU subprocess regressions cover multi-file pipeline and standalone CLI error
 reporting, expected and unexpected exceptions, missing records, worker crashes,
 and completed-record preservation. Publication errors are checked separately.
+
+## 2026-09-26: use one ASR pass with repetition penalty 1.2
+
+Targeted GPU replay used six previously failing windows and two neighboring
+controls with their exact production sample boundaries. The same model instance
+processed all eight requests at penalties 1.0, 1.1 and 1.2. Respectively, four,
+five and zero requests hit the 4096-token output cap. Captured output confirmed
+short phrases repeating thousands of times; prompt sizes were 27–417 tokens,
+well below the 8192-token context limit even with the full output allowance.
+One window terminated at 1.0 but looped at 1.1, so increasing the penalty does
+not monotonically improve every request.
+
+Measured batch times were 53.21, 99.47 and 1.52 seconds, excluding model loading.
+These are single ordered runs on selected difficult inputs, not representative
+throughput measurements. A separate fixed sample of 40 public reference
+utterances (142.67 seconds, 883 normalized characters) produced 101, 98 and 97
+character edits: CER 11.44%, 11.10% and 10.99%. Normalization uses NFKC, lowercase
+and alphanumeric characters; each reference interval is decoded independently.
+This small check found no aggregate regression and does not establish accuracy
+on long-form media or other languages.
+
+Each file's windows now use one generation pass with repetition penalty 1.2,
+configured in `src/config.py`. Length truncation or extreme repetition fails the
+file after that pass, preserving the affected window IDs and time ranges. The
+retry branch, its configuration constant and its progress label were removed.
+Other files remain isolated and continue through the batch. Windowing, token
+limits, model loading and dependency versions are unchanged. Replay scripts,
+raw outputs and benchmark selections remain outside the repository under `/tmp`.
+
+The updated production ASR worker then replayed all eight windows grouped by
+their four original files: all succeeded on the first pass. Final validation:
+141 CPU tests passed, with the two unrelated native Whisper GPU tests excluded;
+Ruff and basedpyright passed. Fresh PTY checks and two independent read-only
+checks verified the failure-log presentation. Full-film and end-to-end subtitle
+quality were not re-evaluated in this targeted run.
+Regression tests verify that invalid output is never resubmitted, even if a
+second generation would have succeeded.

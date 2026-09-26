@@ -441,17 +441,25 @@ def _qwen_output(text: str, finish_reason: str = "stop") -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    "text,finish_reason",
-    [("Partial", "length"), ("Echo!" * 25, "stop"), ("a" * 21, "stop")],
+    "text,finish_reason,error_code",
+    [
+        ("Partial", "length", "asr_truncated"),
+        ("Echo!" * 25, "stop", "asr_repetition"),
+        ("a" * 21, "stop", "asr_repetition"),
+    ],
 )
 @pytest.mark.parametrize("show_progress", (False, True))
-def test_qwen_retries_only_suspect_windows_once(
-    qwen_llm: Mock, text: str, finish_reason: str, show_progress: bool
+def test_qwen_invalid_window_fails_without_resubmitting_the_batch(
+    qwen_llm: Mock,
+    text: str,
+    finish_reason: str,
+    error_code: str,
+    show_progress: bool,
 ) -> None:
     from io import StringIO
     import numpy as np
     from src.aligner import AlignmentRecord
-    from src.transcribe import QwenASR
+    from src.transcribe import QwenASR, TranscriptionError
 
     records = [
         AlignmentRecord(
@@ -474,34 +482,26 @@ def test_qwen_retries_only_suspect_windows_once(
         [_qwen_output("Bonjour.")],
     ]
     stream = StringIO() if show_progress else None
-    results = QwenASR(qwen_llm, stream).transcribe(records, audio)
-    assert [r.text for r in results] == ["Keep this.", "Bonjour.", "Last."]
-    assert [(r.segment_id, r.start, r.end, r.language) for r in results] == [
-        (r.segment_id, r.start, r.end, r.language) for r in records
-    ]
-    assert all(r.error is None for r in results)
-    first, retry = qwen_llm.generate.call_args_list
-    assert len(first.args[0]) == 3 and len(retry.args[0]) == 1
-    assert retry.args[0][0]["prompt"] == first.args[0][1]["prompt"]
+    with pytest.raises(TranscriptionError) as failure:
+        QwenASR(qwen_llm, stream).transcribe(records, audio)
+    assert f"b (2.000-4.000 s): {error_code}" in str(failure.value)
+    assert qwen_llm.generate.call_count == 1
+    call = qwen_llm.generate.call_args
+    assert len(call.args[0]) == 3
     np.testing.assert_array_equal(
-        retry.args[0][0]["multi_modal_data"]["audio"][0], audio[32000:64000]
+        call.args[0][1]["multi_modal_data"]["audio"][0], audio[32000:64000]
     )
-    assert [call.args[1].repetition_penalty for call in (first, retry)] == [1.0, 1.1]
-    assert all(
-        call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
-        for call in (first, retry)
-    )
-    for call in (first, retry):
-        callback = call.kwargs["use_tqdm"]
-        if show_progress:
-            with callback(total=len(call.args[0]), desc="Processed prompts") as bar:
-                bar.update(len(call.args[0]))
-                bar.refresh()
-        else:
-            assert callback is False
+    assert call.args[1].repetition_penalty == 1.2
+    assert call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
+    callback = call.kwargs["use_tqdm"]
+    if show_progress:
+        with callback(total=len(call.args[0]), desc="Processed prompts") as bar:
+            bar.update(len(call.args[0]))
+            bar.refresh()
+    else:
+        assert callback is False
     if stream is not None:
         assert "Qwen ASR:" in stream.getvalue()
-        assert "Qwen ASR retry:" in stream.getvalue()
 
 
 def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
@@ -520,7 +520,7 @@ def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
 @pytest.mark.parametrize(
     "text,reason", [("Partial", "length"), ("Again!" * 25, "stop")]
 )
-def test_qwen_unrecovered_window_fails_in_asr_with_time_range(
+def test_qwen_invalid_window_fails_in_asr_with_time_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     qwen_llm: Mock,
@@ -545,10 +545,10 @@ def test_qwen_unrecovered_window_fails_in_asr_with_time_range(
         transcribe_module, "read_audio", lambda path: np.zeros(32000, dtype=np.float32)
     )
     QwenWorker("asr", "English", True).run([(tmp_path / "audio.wav", tmp_path)])
-    assert qwen_llm.generate.call_count == 2
+    assert qwen_llm.generate.call_count == 1
     assert not (tmp_path / "asr.json").exists()
     error = (tmp_path / "asr.error").read_text()
-    assert "w1" in error and "1.000-2.000 s" in error and "after one retry" in error
+    assert "w1" in error and "1.000-2.000 s" in error
 
 
 @pytest.mark.parametrize("quiet", (False, True))

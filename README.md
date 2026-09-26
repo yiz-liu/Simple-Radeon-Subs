@@ -232,7 +232,7 @@ files can be mixed in the same input tree.
 Within each Qwen stage, files are processed sequentially with the loaded model.
 Each file submits all its ASR windows together; alignment submits all windows
 that require timestamps together. vLLM schedules up to four concurrent requests
-with an 8192-token budget per scheduling step. Retries batch only suspect windows.
+with an 8192-token budget per scheduling step.
 When `--output-dir` is used, the source directory layout is preserved below it.
 
 Each source uses a private sidecar beside the media file:
@@ -294,9 +294,9 @@ directory that is cleaned up after transcription, including on failure.
 
 Qwen shows a file progress bar for each stage and window progress during ASR
 and alignment. An `inputs` bar tracks request preparation; the inference bar
-counts completed audio windows, not subtitle lines or audio seconds. ASR retries
-have their own window bar, and alignment excludes short windows that use their
-existing boundaries. Model loading precedes the window bars.
+counts completed audio windows, not subtitle lines or audio seconds. Alignment
+excludes short windows that use their existing boundaries. Model loading
+precedes the window bars.
 
 Qwen ASR, alignment and translation show project stage messages and inference
 progress. vLLM warnings and errors appear in the terminal as they occur; its
@@ -352,18 +352,17 @@ and timing rules live in `src/aligner.py`:
 4. Valid alignment is retained and bounded to the window. Consecutive invalid
    spans use neighboring valid cues or the window edges. Gaps below `0.32 s`
    merge into an adjacent cue in the same window, preserving text order.
-5. Truncated ASR or extreme consecutive repetition triggers one retry for the
-   affected windows with `repetition_penalty=1.1`. Audio bounds and language
-   settings stay the same. A retry that remains invalid fails the file during
-   ASR and reports the affected time ranges. Native errors also fail the file.
+5. Each file's windows are transcribed in one pass. Truncated ASR or extreme
+   consecutive repetition fails the file during ASR and reports the affected
+   time ranges. Native errors also fail the file.
    Empty ASR windows produce a warning. Timing fallback is an estimate and still
    benefits from listening checks. Qwen cleanup preserves long cue durations.
 
 ASR and alignment use BF16, eager execution, model-runner V1, four concurrent
 requests, an `8192`-token context/batch budget and `0.5` GPU memory utilization.
-The first ASR pass uses greedy decoding with a `4096`-token output limit and
-`repetition_penalty=1.0`. Repeat detection uses the pinned Qwen processor's
-extreme-repeat rules to flag suspect text for retry.
+ASR uses greedy decoding with a `4096`-token output limit and
+`repetition_penalty=1.2`. Repeat detection uses the pinned Qwen processor's
+extreme-repeat rules to identify invalid output.
 
 ## Subtitle Cleanup
 
