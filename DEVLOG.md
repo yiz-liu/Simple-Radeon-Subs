@@ -352,3 +352,22 @@ before worker exit, verified quiet mode and native-log separation, and covered
 40-column, 120-column and zero-width terminal reports (falling back to 80).
 Narrow terminals retain labels and counters while omitting timing metadata.
 GPU inference remains reserved for manual validation.
+
+## 2026-09-26: unify vLLM runtime logging
+
+ASR, alignment and translation share a WARNING-level vLLM logging setup before
+loading their engines. It configures both the current logger and inherited
+worker environment, routes native warnings/errors to stderr, and suppresses
+weight-loading bars while keeping inference progress and project stage messages.
+Qwen workers inherit stderr so warnings are visible immediately, including in
+quiet mode. Standard output remains captured in an anonymous temporary file;
+failed stages report its bounded tail alongside the exit code. Native stderr
+failures are displayed directly, rather than copied into that tail. No persistent
+logging artifacts, inference settings or dependencies were added.
+
+Validation passed 132 submission tests with two GPU tests excluded, plus Ruff,
+basedpyright and LSP checks. Real PTYs verify live warning delivery with and
+without progress, and a failing subprocess preserves completed files and
+reports both its stderr and bounded stdout details. The installed vLLM logger
+was exercised through all three engine entry points with model construction
+substituted; GPU inference remains reserved for manual validation.

@@ -286,7 +286,8 @@ python -m src.transcribe /path/to/audio.wav -o ./subs --disable-vad
 python -m src.transcribe /path/to/audio.wav -o ./subs --asr-backend qwen -l fr
 ```
 
-`--quiet` hides transcription progress. Qwen requires 16 kHz mono PCM16 WAV;
+`--quiet` hides transcription progress; warnings and errors remain visible.
+Qwen requires 16 kHz mono PCM16 WAV;
 use `python -m src.audio` to prepare other formats. The command writes the SRT
 to the selected output directory. Stage data is exchanged in a temporary
 directory that is cleaned up after transcription, including on failure.
@@ -295,8 +296,13 @@ Qwen shows a file progress bar for each stage and window progress during ASR
 and alignment. An `inputs` bar tracks request preparation; the inference bar
 counts completed audio windows, not subtitle lines or audio seconds. ASR retries
 have their own window bar, and alignment excludes short windows that use their
-existing boundaries. Model loading precedes the window bars. Progress appears
-live while native output remains captured for error reporting.
+existing boundaries. Model loading precedes the window bars.
+
+Qwen ASR, alignment and translation show project stage messages and inference
+progress. vLLM warnings and errors appear in the terminal as they occur; its
+INFO/DEBUG messages and weight-loading bars are hidden. Failed Qwen stages
+include the worker exit code and a bounded standard-output tail. Runtime output
+is not retained as log files.
 
 ## Managed Qwen ASR Profile
 

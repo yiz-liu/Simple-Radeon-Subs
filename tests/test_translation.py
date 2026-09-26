@@ -249,3 +249,69 @@ def test_shared_srt_writer_keeps_existing_output_when_save_fails(
         save_subtitles_atomic(output, pysrt.SubRipFile())
     assert output.read_text() == "previous result"
     assert not list(tmp_path.glob(".result.srt.*.tmp"))
+
+
+@pytest.mark.parametrize("backend", ("translation", "asr", "align"))
+@pytest.mark.parametrize("failure", (False, True))
+def test_native_logging_keeps_warnings_and_errors_without_initialization_noise(
+    tmp_path: Path, backend: str, failure: bool
+) -> None:
+    import os
+    import subprocess
+
+    # Given: The installed vLLM logger with only model construction substituted.
+    script = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+import vllm
+
+def load_model(**kwargs):
+    from vllm.logger import init_logger
+    native = init_logger('vllm.logging_check')
+    native.debug('native-debug-sentinel')
+    native.info('native-info-sentinel')
+    native.warning('native-warning-sentinel')
+    if kwargs.get('use_tqdm_on_load', True):
+        print('weight-progress-sentinel', file=sys.stderr)
+    if sys.argv[3] == '1':
+        try:
+            raise RuntimeError('native-failure-detail')
+        except RuntimeError:
+            native.exception('native-error-sentinel')
+            raise
+    return SimpleNamespace()
+
+vllm.LLM = load_model
+if sys.argv[1] == 'translation':
+    from src.translation import VLLMTranslator
+    VLLMTranslator(Path(sys.argv[2]))._load_engine()
+else:
+    from src.transcribe import QwenWorker
+    QwenWorker._load_model(sys.argv[1])
+"""
+    environment = os.environ.copy()
+    environment.pop("VLLM_LOGGING_LEVEL", None)
+    environment.pop("VLLM_LOGGING_STREAM", None)
+
+    # When: Each production entry point initializes its runtime in a fresh process.
+    completed = subprocess.run(
+        [sys.executable, "-c", script, backend, str(tmp_path), str(int(failure))],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+        timeout=30,
+    )
+
+    # Then: Warning/error details survive; initialization noise stays hidden.
+    output = completed.stdout + completed.stderr
+    assert "native-info-sentinel" not in output
+    assert "native-debug-sentinel" not in output
+    assert "weight-progress-sentinel" not in output
+    assert "native-warning-sentinel" in completed.stderr
+    assert (completed.returncode != 0) is failure
+    if failure:
+        assert "native-error-sentinel" in completed.stderr
+        assert "RuntimeError: native-failure-detail" in completed.stderr
+        assert "Traceback" in completed.stderr

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Final
 import pysrt
 
 from src.config import TRANSLATION_MODEL_PATH
-from src.logger import logger
+from src.logger import configure_vllm_logging, logger
 from src.translation_output import _build_final_subtitles
 from src.utils import save_subtitles_atomic as _save_subtitles
 from src.translation_requests import (
@@ -215,11 +215,13 @@ class VLLMTranslator:
         if self._llm is not None:
             return self._llm
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+        configure_vllm_logging()
         from vllm import LLM
 
         logger.info("Loading vLLM model: %s", self.model_path.name)
         self._llm = LLM(
             model=str(self.model_path),
+            use_tqdm_on_load=False,
             gpu_memory_utilization=0.7,
             language_model_only=True,
             max_model_len=MODEL_CONTEXT_LENGTH,

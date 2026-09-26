@@ -698,14 +698,16 @@ def test_qwen_progress_reaches_terminal_before_worker_exits(
     from src.transcribe import QwenBatchRunner
 
     child = """
-import json, os, sys, time
+import json, logging, os, sys, time
 from contextlib import nullcontext
 from pathlib import Path
 from src.utils import inference_progress
 
 directory = Path(json.loads(sys.stdin.buffer.read())[0][1])
 fd = int(sys.argv[4])
-print('native-log-sentinel', file=sys.stderr, flush=True)
+print('native-log-sentinel', flush=True)
+logging.basicConfig(level=logging.WARNING)
+logging.warning('native-warning-sentinel')
 with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
     factory = inference_progress(terminal, 'Qwen ASR')
     bar = factory(total=3, desc='Processed prompts', dynamic_ncols=True) if factory else None
@@ -728,6 +730,8 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
 
     def run_child(command, **kwargs):
         command[2] = child
+        if kwargs.get("stderr") is None:
+            kwargs["stderr"] = slave
         return native_run(command, **kwargs)
 
     monkeypatch.setattr(transcribe_module.subprocess, "run", run_child)
@@ -756,6 +760,7 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
                 assert not future.done()
                 if select.select([master], [], [], 0.1)[0]:
                     captured += os.read(master, 65536)
+                assert b"native-warning-sentinel" in captured
                 assert (b"1/3" in captured) is not quiet
             finally:
                 (tmp_path / "continue").touch()
@@ -767,7 +772,7 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
         os.close(slave)
     assert b"native-log-sentinel" not in captured
     if quiet:
-        assert captured == b""
+        assert b"Qwen ASR" not in captured
     else:
         assert b"100%" in captured and b"3/3" in captured
 

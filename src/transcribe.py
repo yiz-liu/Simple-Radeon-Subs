@@ -37,7 +37,7 @@ from src.config import (
     WHISPER_MODEL_PATH,
     WHISPER_VAD_MODEL_PATH,
 )
-from src.logger import logger
+from src.logger import configure_vllm_logging, logger
 from src.utils import inference_progress, save_subtitles_atomic
 from src.whisper_batch import (
     TranscriptionFailure,
@@ -234,7 +234,7 @@ class QwenBatchRunner:
                 input=inputs,
                 pass_fds=(progress_fd,) if progress_fd >= 0 else (),
                 stdout=handle,
-                stderr=subprocess.STDOUT,
+                stderr=None,
                 check=False,
             )
             handle.seek(max(0, handle.tell() - QWEN_ERROR_TAIL_BYTES))
@@ -434,6 +434,7 @@ class QwenWorker:
     def _load_model(stage: Literal["asr", "align"]) -> LLM:
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         os.environ["HF_HUB_OFFLINE"] = "1"
+        configure_vllm_logging()
         from vllm import LLM
 
         is_asr = stage == "asr"
@@ -445,6 +446,7 @@ class QwenWorker:
             if is_asr
             else {"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
             dtype="bfloat16",
+            use_tqdm_on_load=False,
             enforce_eager=True,
             gpu_memory_utilization=QWEN_GPU_MEMORY_UTILIZATION,
             max_model_len=QWEN_MAX_MODEL_LEN,
