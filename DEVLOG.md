@@ -458,3 +458,42 @@ flush failures. Validation passed 154 tracked CPU tests, Ruff, basedpyright and
 LSP checks. The two native Whisper GPU tests were excluded. Fresh PTY/pipe captures
 cover success, handled failures, crashes and nested progress at narrow and
 normal terminal widths. GPU inference and font rendering were not revalidated.
+
+## 2026-09-26: bound repetitive Qwen generation and preserve partial results
+
+An 85-window comparison used 19 previously failing windows and 66 TEDx control
+windows. With the existing 4096-token limit, 14 problem windows exhausted the
+budget in exact repetition loops. Problem-window generation took 263.1 seconds;
+a 512-token limit reduced it to 28.2 seconds. Native repetition detection with
+1–20-token patterns repeated 30 times reduced it to 7.5 seconds. These are
+selected-window measurements, excluding loading, alignment and subtitle
+publication, rather than full-film speedups. All control windows stopped
+naturally, with at most 163 output tokens. Identical-parameter reruns also
+produced some text differences; these measurements do not establish a content
+accuracy improvement.
+
+The fixed ASR profile uses that 512-token limit and 30-repeat detector, keeping
+the 8192-token context, batching and repetition penalty 1.2. The pinned Qwen
+processor's existing repetition repair runs on raw output before stripping
+whitespace. At a 20-repeat threshold, one isolated case escaped repair because
+the character fixer requires more than 20 repeats; another lost its complete
+repeated pattern when trailing whitespace was stripped first. Both isolated
+cases preserved identical token prefixes across comparisons, and the 30-repeat
+setting allowed repair to work.
+
+ASR length/repetition outcomes are stored as a typed quality warning on the
+existing alignment record. Cleaned text proceeds through alignment, and
+publication reports affected window IDs and ranges once per file, together
+with any empty-window count. Runtime exceptions, fatal record errors, invalid
+subtitle spans and entirely empty speech results remain failures. Generation
+is single-pass. Early stopping and repair do not restore ungenerated speech
+or reliably detect non-repetitive hallucinations.
+
+Validation passed 164 tracked CPU tests, Ruff and basedpyright. The two Whisper
+GPU tests were excluded. A production transcription batch on ROCm processed
+two known repetitive windows and one normal control through ASR, ForcedAligner
+and SRT publication. All three completed, producing 11 positive-duration,
+non-overlapping cues in 90.6 seconds including model loading and process
+startup. Each repetitive input reported one quality warning; the normal input
+reported none. This validates integration and output structure, not full-film
+semantic accuracy or manually reviewed timing.

@@ -352,17 +352,24 @@ and timing rules live in `src/aligner.py`:
 4. Valid alignment is retained and bounded to the window. Consecutive invalid
    spans use neighboring valid cues or the window edges. Gaps below `0.32 s`
    merge into an adjacent cue in the same window, preserving text order.
-5. Each file's windows are transcribed in one pass. Truncated ASR or extreme
-   consecutive repetition fails the file during ASR and reports the affected
-   time ranges. Native errors also fail the file.
-   Empty ASR windows produce a warning. Timing fallback is an estimate and still
-   benefits from listening checks. Qwen cleanup preserves long cue durations.
+5. Each file's windows are transcribed in one pass. Extreme consecutive
+   repetition is collapsed before alignment, preserving surrounding text.
+   Output-length limits and detected repetition produce one quality warning
+   per file with affected window IDs and time ranges. The warning also includes
+   any empty-window count. Kept text continues through alignment and subtitle
+   publication; review these ranges for incomplete speech. Native errors,
+   invalid subtitle spans and
+   entirely empty speech results fail the file. Timing fallback is an estimate
+   and still benefits from listening checks. Qwen cleanup preserves long cue
+   durations.
 
 ASR and alignment use BF16, eager execution, model-runner V1, four concurrent
 requests, an `8192`-token context/batch budget and `0.5` GPU memory utilization.
-ASR uses greedy decoding with a `4096`-token output limit and
-`repetition_penalty=1.2`. Repeat detection uses the pinned Qwen processor's
-extreme-repeat rules to identify invalid output.
+ASR uses greedy decoding with a `512`-token output limit and
+`repetition_penalty=1.2`. vLLM stops generation when an exact pattern of `1–20`
+tokens repeats `30` consecutive times. The pinned Qwen processor collapses
+extreme character repetitions before text is aligned. Early stopping and
+cleanup cannot recover speech that was never transcribed.
 
 ## Subtitle Cleanup
 
