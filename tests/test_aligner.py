@@ -45,6 +45,27 @@ def test_long_window_routes_to_aligner_but_empty_and_failed_do_not() -> None:
     assert not render_timed_record(failed)[0].published
 
 
+def test_asr_quality_warning_does_not_exclude_cleaned_text_from_alignment(
+    tmp_path: Path,
+) -> None:
+    from src.aligner import read_records, write_records
+
+    # Given: Kept text and valid times with a non-fatal ASR quality marker.
+    source = record((1, 2, 3, 4, 5, 6)).model_copy(
+        update={"asr_warning": "asr_truncated"}
+    )
+
+    # When: Records cross the worker JSON boundary and alignment merge.
+    write_records(tmp_path / "records.json", [source])
+    restored = read_records(tmp_path / "records.json")
+    merged = merge_alignments(restored, restored)
+
+    # Then: The text is aligned/published and its warning survives intact.
+    assert needs_alignment(merged[0])
+    assert merged[0].asr_warning == "asr_truncated"
+    assert all(c.published for c in render_timed_record(merged[0]))
+
+
 def test_valid_times_are_unchanged_and_small_overshoot_is_clipped() -> None:
     cues = render_timed_record(record((1, 2, 3, 4, 8, 10.028)))
     assert [(c.start, c.end) for c in cues] == [(11, 12), (13, 14), (18, 20)]

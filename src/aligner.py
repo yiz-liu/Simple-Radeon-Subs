@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Literal, TextIO
 import unicodedata
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -36,6 +36,7 @@ class AlignmentRecord(BaseModel):
     language: str | None = None
     units: tuple[str, ...] = ()
     fixed: tuple[float, ...] = ()
+    asr_warning: Literal["asr_truncated", "asr_repetition"] | None = None
     error: str | None = None
 
 

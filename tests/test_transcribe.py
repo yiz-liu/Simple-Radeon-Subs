@@ -430,10 +430,13 @@ def test_source_language_is_optional_and_parsed_from_model_output() -> None:
 def qwen_llm(monkeypatch: pytest.MonkeyPatch) -> Mock:
     fake_vllm = ModuleType("vllm")
     fake_inputs = ModuleType("vllm.inputs")
+    fake_sampling = ModuleType("vllm.sampling_params")
     setattr(fake_vllm, "SamplingParams", SimpleNamespace)
     setattr(fake_inputs, "TextPrompt", dict)
+    setattr(fake_sampling, "RepetitionDetectionParams", SimpleNamespace)
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
     monkeypatch.setitem(sys.modules, "vllm.inputs", fake_inputs)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", fake_sampling)
     return Mock()
 
 
@@ -444,25 +447,35 @@ def _qwen_output(text: str, finish_reason: str = "stop") -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    "text,finish_reason,error_code",
+    "text,finish_reason,warning,cleaned",
     [
-        ("Partial", "length", "asr_truncated"),
-        ("Echo!" * 25, "stop", "asr_repetition"),
-        ("a" * 21, "stop", "asr_repetition"),
+        ("Partial", "length", "asr_truncated", "Partial"),
+        (
+            "Before. " + "Echo! " * 30 + "After.",
+            "stop",
+            "asr_repetition",
+            "Before. Echo! After.",
+        ),
+        ("a" * 21, "stop", "asr_repetition", "a"),
+        ("a" * 20, "repetition", "asr_repetition", "a" * 20),
+        ("Echo! " * 20, "repetition", "asr_repetition", "Echo!"),
+        ("Echo! " * 30, "length", "asr_truncated", "Echo!"),
+        ("", "length", "asr_truncated", ""),
     ],
 )
 @pytest.mark.parametrize("show_progress", (False, True))
-def test_qwen_invalid_window_fails_without_resubmitting_the_batch(
+def test_qwen_quality_warning_preserves_cleaned_text_without_resubmitting(
     qwen_llm: Mock,
     text: str,
     finish_reason: str,
-    error_code: str,
+    warning: str,
+    cleaned: str,
     show_progress: bool,
 ) -> None:
     from io import StringIO
     import numpy as np
     from src.aligner import AlignmentRecord
-    from src.transcribe import QwenASR, TranscriptionError
+    from src.transcribe import QwenASR
 
     records = [
         AlignmentRecord(
@@ -485,9 +498,10 @@ def test_qwen_invalid_window_fails_without_resubmitting_the_batch(
         [_qwen_output("Bonjour.")],
     ]
     stream = StringIO() if show_progress else None
-    with pytest.raises(TranscriptionError) as failure:
-        QwenASR(qwen_llm, stream).transcribe(records, audio)
-    assert f"b (2.000-4.000 s): {error_code}" in str(failure.value)
+    result = QwenASR(qwen_llm, stream).transcribe(records, audio)
+    assert [r.text for r in result] == ["Keep this.", cleaned, "Last."]
+    assert [r.asr_warning for r in result] == [None, warning, None]
+    assert all(r.error is None for r in result)
     assert qwen_llm.generate.call_count == 1
     call = qwen_llm.generate.call_args
     assert len(call.args[0]) == 3
@@ -495,7 +509,13 @@ def test_qwen_invalid_window_fails_without_resubmitting_the_batch(
         call.args[0][1]["multi_modal_data"]["audio"][0], audio[32000:64000]
     )
     assert call.args[1].repetition_penalty == 1.2
-    assert call.args[1].temperature == 0 and call.args[1].max_tokens == 4096
+    assert call.args[1].temperature == 0 and call.args[1].max_tokens == 512
+    detector = call.args[1].repetition_detection
+    assert (
+        detector.min_pattern_size,
+        detector.max_pattern_size,
+        detector.min_count,
+    ) == (1, 20, 30)
     callback = call.kwargs["use_tqdm"]
     assert callback is False
     if stream is not None:
@@ -512,22 +532,24 @@ def test_qwen_preserves_normal_repetition_without_retry(qwen_llm: Mock) -> None:
     qwen_llm.generate.return_value = [_qwen_output("language English<asr_text>" + text)]
     result = QwenASR(qwen_llm).transcribe([record], np.zeros(16000, dtype=np.float32))
     assert result[0].text == text and result[0].language == "English"
+    assert result[0].asr_warning is None
     assert qwen_llm.generate.call_count == 1
 
 
 @pytest.mark.parametrize(
     "text,reason", [("Partial", "length"), ("Again!" * 25, "stop")]
 )
-def test_qwen_invalid_window_fails_in_asr_with_time_range(
+def test_qwen_quality_warning_survives_stages_and_is_reported_once_at_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     qwen_llm: Mock,
+    caplog: pytest.LogCaptureFixture,
     text: str,
     reason: str,
 ) -> None:
     import numpy as np
-    from src.aligner import AlignmentRecord, write_records
-    from src.transcribe import QwenWorker
+    from src.aligner import AlignmentRecord, read_records, write_records
+    from src.transcribe import QwenBatchRunner, QwenWorker
 
     qwen_llm.generate.return_value = [_qwen_output(text, reason)]
     write_records(
@@ -544,9 +566,57 @@ def test_qwen_invalid_window_fails_in_asr_with_time_range(
     )
     QwenWorker("asr", "English", True).run([(tmp_path / "audio.wav", tmp_path)])
     assert qwen_llm.generate.call_count == 1
+    assert not (tmp_path / "asr.error").exists()
+    records = read_records(tmp_path / "asr.json")
+    assert records[0].text == ("Partial" if reason == "length" else "Again!")
+    assert records[0].asr_warning is not None
+    assert not caplog.records
+    QwenWorker("align", "English", True).run([(tmp_path / "audio.wav", tmp_path)])
+    task = TranscriptionTask(tmp_path / "audio.wav", tmp_path / "output.srt")
+    QwenBatchRunner._publish(task, tmp_path)
+    assert records[0].text in task.output_path.read_text()
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "w1 (1.000-2.000 s)" in warnings[0]
+    assert records[0].asr_warning in warnings[0]
+    assert str(task.audio_path) in warnings[0]
+
+
+def test_qwen_native_asr_failure_remains_fatal_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qwen_llm: Mock,
+) -> None:
+    import numpy as np
+    from src.aligner import AlignmentRecord, write_records
+    from src.transcribe import QwenWorker
+
+    # Given: A real runtime failure rather than a generated text quality issue.
+    write_records(
+        tmp_path / "prepare.json",
+        [
+            AlignmentRecord(
+                segment_id="w1",
+                start=0,
+                end=16000,
+                text="",
+                language="English",
+            )
+        ],
+    )
+    qwen_llm.generate.side_effect = RuntimeError("device failure")
+    monkeypatch.setattr(QwenWorker, "_load_model", staticmethod(lambda stage: qwen_llm))
+    monkeypatch.setattr(
+        transcribe_module, "read_audio", lambda path: np.zeros(16000, dtype=np.float32)
+    )
+
+    # When: The ASR worker handles the file once.
+    QwenWorker("asr", "English", True).run([(tmp_path / "audio.wav", tmp_path)])
+
+    # Then: The file fails with its original cause and no usable ASR records.
+    assert qwen_llm.generate.call_count == 1
+    assert "device failure" in (tmp_path / "asr.error").read_text()
     assert not (tmp_path / "asr.json").exists()
-    error = (tmp_path / "asr.error").read_text()
-    assert "w1" in error and "1.000-2.000 s" in error
 
 
 @pytest.mark.parametrize("quiet", (False, True))
@@ -1018,12 +1088,16 @@ def test_qwen_publish_preserves_existing_srt_on_failure(
     with pytest.raises(TranscriptionError, match="asr_truncated"):
         QwenBatchRunner._publish(task, tmp_path)
     assert destination.read_text() == "previous result"
-    complete = failed.model_copy(update={"text": "Hello.", "error": None})
+    complete = failed.model_copy(
+        update={"text": "Hello.", "error": None, "asr_warning": "asr_truncated"}
+    )
     empty = AlignmentRecord(segment_id="b", start=32000, end=64000, text="")
     write_records(tmp_path / "align.json", [complete, empty])
     QwenBatchRunner._publish(task, tmp_path)
     assert pysrt.open(str(destination), encoding="utf-8")[0].text == "Hello."
     assert "1 speech windows returned empty text" in caplog.text
+    assert "a (0.000-1.000 s): asr_truncated" in caplog.text
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
     assert {p.name for p in tmp_path.iterdir()} == {"align.json", "output.srt"}
 
 

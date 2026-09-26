@@ -32,6 +32,9 @@ from src.config import (
     QWEN_MAX_BATCHED_TOKENS,
     QWEN_MAX_OUTPUT_TOKENS,
     QWEN_REPETITION_PENALTY,
+    QWEN_REPETITION_MIN_PATTERN_SIZE,
+    QWEN_REPETITION_MAX_PATTERN_SIZE,
+    QWEN_REPETITION_MIN_COUNT,
     WHISPER_CLI_PATH,
     WHISPER_MODEL_PATH,
     WHISPER_VAD_MODEL_PATH,
@@ -292,14 +295,22 @@ class QwenBatchRunner:
             )
         if records and not cues:
             raise TranscriptionError("All speech windows returned empty text")
+        save_subtitles_atomic(task.output_path, subtitles)
+        warnings = [
+            f"{r.segment_id} ({r.start / AUDIO_SAMPLE_RATE:.3f}-"
+            f"{r.end / AUDIO_SAMPLE_RATE:.3f} s): {r.asr_warning}"
+            for r in records
+            if r.asr_warning
+        ]
         empty_windows = sum(not record.text for record in records)
         if empty_windows:
+            warnings.append(f"{empty_windows} speech windows returned empty text")
+        if warnings:
             logger.warning(
-                "%s: %d speech windows returned empty text",
+                "Qwen ASR quality warning for %s; subtitles may be incomplete: %s",
                 task.audio_path,
-                empty_windows,
+                "; ".join(warnings),
             )
-        save_subtitles_atomic(task.output_path, subtitles)
 
 
 class QwenWorker:
@@ -502,16 +513,7 @@ class QwenASR:
     ) -> list[AlignmentRecord]:
         if not records:
             return []
-        result = self._generate(records, audio)
-        errors = [
-            f"{r.segment_id} ({r.start / AUDIO_SAMPLE_RATE:.3f}-"
-            f"{r.end / AUDIO_SAMPLE_RATE:.3f} s): {r.error}"
-            for r in result
-            if r.error
-        ]
-        if errors:
-            raise TranscriptionError("ASR failed: " + "; ".join(errors))
-        return result
+        return self._generate(records, audio)
 
     def _generate(
         self,
@@ -523,6 +525,7 @@ class QwenASR:
         )
         from vllm import SamplingParams
         from vllm.inputs import TextPrompt
+        from vllm.sampling_params import RepetitionDetectionParams
 
         prompts: list[TextPrompt] = []
         for record in records:
@@ -545,22 +548,29 @@ class QwenASR:
                 temperature=0,
                 max_tokens=QWEN_MAX_OUTPUT_TOKENS,
                 repetition_penalty=QWEN_REPETITION_PENALTY,
+                repetition_detection=RepetitionDetectionParams(
+                    min_pattern_size=QWEN_REPETITION_MIN_PATTERN_SIZE,
+                    max_pattern_size=QWEN_REPETITION_MAX_PATTERN_SIZE,
+                    min_count=QWEN_REPETITION_MIN_COUNT,
+                ),
             ),
             use_tqdm=inference_progress(self.progress, "Qwen ASR"),
         )
         result: list[AlignmentRecord] = []
         for record, output in zip(records, outputs, strict=True):
             completion = output.outputs[0]
-            language, text = self.parse_output(completion.text, record.language)
+            cleaned = _detect_and_fix_repetitions(completion.text)
+            language, text = self.parse_output(cleaned, record.language)
             if text and language is None:
                 raise TranscriptionError(
                     "ASR returned text without a detected language"
                 )
-            error = (
+            warning = (
                 "asr_truncated"
                 if completion.finish_reason == "length"
                 else "asr_repetition"
-                if _detect_and_fix_repetitions(text) != text
+                if completion.finish_reason == "repetition"
+                or cleaned != completion.text
                 else None
             )
             result.append(
@@ -568,7 +578,7 @@ class QwenASR:
                     update={
                         "text": text,
                         "language": language,
-                        "error": error,
+                        "asr_warning": warning,
                     }
                 )
             )
