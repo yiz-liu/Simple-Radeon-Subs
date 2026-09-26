@@ -427,3 +427,34 @@ checks verified the failure-log presentation. Full-film and end-to-end subtitle
 quality were not re-evaluated in this targeted run.
 Regression tests verify that invalid output is never resubmitted, even if a
 second generation would have succeeded.
+
+## 2026-09-26: isolate native diagnostics from terminal progress
+
+Live native stderr still mixed Transformers, Python, vLLM and C++ warnings
+with active progress bars. Qwen workers now capture both native output streams
+in an anonymous temporary file and reserve a separate inherited descriptor for
+project logs and progress. Translation applies the same isolation across model
+loading, inference and release. A failed stage includes one bounded diagnostic
+tail; successful stages discard the temporary output. Project warnings and
+errors remain live through a progress-aware handler, with propagation disabled
+while using the dedicated stream to prevent duplicate captured project logs.
+
+Translation uses the shared request progress renderer. Request-preparation bars
+are hidden, model loading has an explicit status, and redirected output uses
+ordinary status lines. Extraction and Whisper also disable dynamic bars when
+standard error is not a terminal. Inference parameters, dependency versions and
+model weights are unchanged.
+
+Descriptor transitions flush Python and C stdout/stderr without flushing
+unrelated C file streams. Exit-flush I/O errors produce a warning while the
+original inference result, exception or cancellation is preserved, and the
+output descriptors are restored. Translation passes its progress stream
+explicitly to inference instead of storing temporary state on the translator.
+Qwen manages its two fixed output resources with a combined `with` statement.
+Regression coverage includes active progress during repeated native warnings,
+direct descriptor writes, C stdout, inherited child output, quiet mode,
+redirected streams, model release, failure reporting, unrelated C streams and
+flush failures. Validation passed 154 tracked CPU tests, Ruff, basedpyright and
+LSP checks. The two native Whisper GPU tests were excluded. Fresh PTY/pipe captures
+cover success, handled failures, crashes and nested progress at narrow and
+normal terminal widths. GPU inference and font rendering were not revalidated.

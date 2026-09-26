@@ -293,18 +293,18 @@ to the selected output directory. Stage data is exchanged in a temporary
 directory that is cleaned up after transcription, including on failure.
 
 Qwen shows a file progress bar for each stage and window progress during ASR
-and alignment. An `inputs` bar tracks request preparation; the inference bar
-counts completed audio windows, not subtitle lines or audio seconds. Alignment
+and alignment. The inference bar counts completed audio windows, not subtitle
+lines or audio seconds. Alignment
 excludes short windows that use their existing boundaries. Model loading
-precedes the window bars.
+has a separate status message. Translation shows completed requests.
 
 Qwen ASR, alignment and translation show project stage messages and inference
-progress. vLLM warnings and errors appear in the terminal as they occur; its
-INFO/DEBUG messages and weight-loading bars are hidden. Failed Qwen stages also
-report each file's failure once in the final summary, with a traceback for
-unexpected exceptions. A worker crash or missing result produces one stage
-diagnostic with its exit code and captured standard-output tail. Runtime output
-is not retained as log files.
+progress. Project warnings and errors remain visible. Native runtime output is
+buffered temporarily; failures include the last 8 KiB of available diagnostics.
+Each failed Qwen file is reported once in the final summary, with a traceback
+for unexpected exceptions. Worker failures include the exit code. Runtime output
+is not retained as log files. Logs and progress use standard error; when it is
+redirected or piped, progress uses ordinary lines instead of dynamic bars.
 
 ## Managed Qwen ASR Profile
 
