@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TextIO, assert_never
 
@@ -163,13 +164,12 @@ class QwenBatchRunner:
             for task, directory in pending.items():
                 try:
                     self._publish(task, directory)
-                except (OSError, ValueError, RuntimeError) as error:
-                    logger.error(
-                        "Qwen subtitle publication failed for %s: %s",
-                        task.audio_path,
-                        error,
-                    )
+                except TranscriptionError as error:
                     failures.append(TranscriptionFailure(task, str(error)))
+                except (OSError, ValueError, RuntimeError):
+                    failures.append(
+                        TranscriptionFailure(task, traceback.format_exc().strip())
+                    )
         return failures
 
     @staticmethod
@@ -241,6 +241,7 @@ class QwenBatchRunner:
             error_tail = handle.read().decode("utf-8", errors="replace").strip()
         succeeded: dict[TranscriptionTask, Path] = {}
         failures: list[TranscriptionFailure] = []
+        missing_records = 0
         for task, directory in pending.items():
             error_path = directory / f"{stage}.error"
             if not error_path.is_file() and (directory / f"{stage}.json").is_file():
@@ -250,11 +251,16 @@ class QwenBatchRunner:
                 reason = error_path.read_text(encoding="utf-8")
             except OSError:
                 reason = "Worker did not produce records"
-            detail = f"Qwen {stage} failed (exit {completed.returncode}): {reason}"
+                missing_records += 1
+            failures.append(TranscriptionFailure(task, f"Qwen {stage} failed: {reason}"))
+        if completed.returncode or missing_records:
+            detail = (
+                f"Qwen {stage} worker failed (exit {completed.returncode}; "
+                f"{missing_records} file(s) missing records)"
+            )
             if error_tail:
                 detail += f"\nWorker output tail:\n{error_tail}"
-            logger.error("%s: %s", task.audio_path, detail)
-            failures.append(TranscriptionFailure(task, detail))
+            logger.error("%s", detail)
         return succeeded, failures
 
     @staticmethod
@@ -357,10 +363,13 @@ class QwenWorker:
                         case unreachable:
                             assert_never(unreachable)
                     write_records(directory / f"{self.stage}.json", result)
-                except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
-                    logger.exception("Qwen %s failed for %s", self.stage, audio_path)
+                except TranscriptionError as error:
                     (directory / f"{self.stage}.error").write_text(
-                        str(error) or type(error).__name__, encoding="utf-8"
+                        str(error), encoding="utf-8"
+                    )
+                except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
+                    (directory / f"{self.stage}.error").write_text(
+                        traceback.format_exc().strip(), encoding="utf-8"
                     )
                 finally:
                     progress.update()

@@ -777,46 +777,137 @@ with os.fdopen(fd, 'w') if fd >= 0 else nullcontext(None) as terminal:
         assert b"100%" in captured and b"3/3" in captured
 
 
-def test_qwen_worker_crash_preserves_completed_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("caller", ("pipeline", "cli"))
+@pytest.mark.parametrize("unexpected", (False, True))
+def test_qwen_file_failures_are_reported_once_by_the_public_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    caller: str,
+    unexpected: bool,
 ) -> None:
-    import json
     import subprocess
-    from src.aligner import write_records
+    from src.pipeline import PipelineOptions, PipelinePlan, build_jobs, run_pipeline
+    from src.transcribe import QwenBatchRunner
+
+    # Given: Real stage workers fail on multiple inputs without loading models.
+    sources = tuple(tmp_path / f"file-{index}.wav" for index in range(2))
+    for source in sources:
+        source.touch()
+    native_run = subprocess.run
+
+    def failing_worker(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        command[2] = """
+from src.transcribe import QwenWorker, TranscriptionError
+
+def fail(self, audio_path):
+    marker = audio_path.stem if audio_path.stem != 'audio' else audio_path.parent.name
+    detail = f'{marker}-failure: w00001 (1.000-2.000 s): asr_truncated'
+    if UNEXPECTED:
+        try:
+            raise OSError('native-cause')
+        except OSError as error:
+            raise ValueError(detail) from error
+    raise TranscriptionError(detail)
+
+QwenWorker._prepare = fail
+QwenWorker.main()
+""".replace("UNEXPECTED", str(unexpected))
+        return native_run(command, **kwargs)
+
+    monkeypatch.setattr(transcribe_module.subprocess, "run", failing_worker)
+    monkeypatch.setattr(QwenBatchRunner, "_validate_models", lambda *args: None)
+
+    # When: The actual pipeline or standalone CLI handles each returned failure.
+    if caller == "pipeline":
+        options = PipelineOptions(asr_backend="qwen")
+        jobs = build_jobs(PipelinePlan(sources, tmp_path, None, options))
+        for job in jobs:
+            job.audio_path.parent.mkdir()
+            job.audio_path.touch()
+        result = run_pipeline(jobs, options)
+        assert len(result.failures) == 2
+    else:
+        for source in sources:
+            monkeypatch.setattr(sys, "argv", ["transcribe", str(source), "--asr-backend", "qwen"])
+            assert transcribe_module.main() == 1
+
+    # Then: File-specific details appear once, with tracebacks only for unexpected errors.
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    assert len(messages) == 2
+    for index, message in enumerate(messages):
+        assert f"file-{index}" in message
+        assert message.count("asr_truncated") == 1
+        assert "w00001 (1.000-2.000 s)" in message
+        assert ("Traceback" in message) is unexpected
+        assert ("native-cause" in message) is unexpected
+        assert "Worker output tail" not in message
+        assert "exit 0" not in message
+
+
+@pytest.mark.parametrize("returncode", (0, 9))
+@pytest.mark.parametrize("all_completed", (False, True))
+def test_qwen_worker_crash_preserves_completed_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    returncode: int,
+    all_completed: bool,
+) -> None:
+    import subprocess
     from src.transcribe import QwenBatchRunner, TranscriptionTask
 
     pending = {}
-    for name in ("completed", "reported", "crashed"):
+    for name in ("completed", "reported", "crashed", "not-started"):
         directory = tmp_path / name
         directory.mkdir()
         pending[TranscriptionTask(directory / "audio.wav", directory / "raw.srt")] = (
             directory
         )
 
-    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-        parsed = json.loads(kwargs["input"])
-        assert len(parsed) == 3
-        directory = Path(parsed[0][1])
-        write_records(directory / "asr.json", [])
-        reported = Path(parsed[1][1])
-        (reported / "asr.json").write_text("partial output")
-        (reported / "asr.error").write_text("decode failed")
-        kwargs["stdout"].write(
-            b"early detail\n" + b"x" * 10000 + b"\nfatal worker error\n"
-        )
-        return subprocess.CompletedProcess(command, 9)
+    native_run = subprocess.run
 
-    monkeypatch.setattr("src.transcribe.subprocess.run", fake_run)
+    def failing_worker(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        command[2] = """
+import json, sys
+from pathlib import Path
+
+parsed = json.loads(sys.stdin.buffer.read())
+if ALL_COMPLETED:
+    for audio, directory in parsed:
+        Path(directory, 'asr.json').write_text('[]')
+else:
+    Path(parsed[0][1], 'asr.json').write_text('[]')
+    Path(parsed[1][1], 'asr.json').write_text('partial output')
+    Path(parsed[1][1], 'asr.error').write_text('decode failed')
+print('early detail\\n' + 'x' * 10000 + '\\nfatal worker error', flush=True)
+print('native-stderr-failure', file=sys.stderr, flush=True)
+sys.exit(RETURN_CODE)
+""".replace("ALL_COMPLETED", str(all_completed)).replace("RETURN_CODE", str(returncode))
+        return native_run(command, **kwargs)
+
+    monkeypatch.setattr("src.transcribe.subprocess.run", failing_worker)
     succeeded, failures = QwenBatchRunner._run_stage_process(
         pending, "asr", None, True
     )
     tasks = list(pending)
-    assert list(succeeded) == tasks[:1]
-    assert [failure.task for failure in failures] == tasks[1:]
-    assert "exit 9" in failures[0].reason
-    assert "decode failed" in failures[0].reason
-    assert "fatal worker error" in failures[1].reason
-    assert "early detail" not in failures[1].reason
+    assert list(succeeded) == (tasks if all_completed else tasks[:1])
+    assert [failure.task for failure in failures] == ([] if all_completed else tasks[1:])
+    if not all_completed:
+        assert "decode failed" in failures[0].reason
+        assert all("Worker did not produce records" in failure.reason for failure in failures[1:])
+    assert all("Worker output tail" not in failure.reason for failure in failures)
+    errors = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    if returncode or not all_completed:
+        assert len(errors) == 1
+        assert errors[0].count(f"exit {returncode}") == 1
+        assert errors[0].count("fatal worker error") == 1
+        assert "early detail" not in errors[0]
+        assert "decode failed" not in errors[0]
+    else:
+        assert errors == []
+    assert "native-stderr-failure" in capfd.readouterr().err
     assert not list(tmp_path.rglob("*.log"))
 
 
@@ -844,3 +935,37 @@ def test_qwen_publish_preserves_existing_srt_on_failure(
     assert pysrt.open(str(destination), encoding="utf-8")[0].text == "Hello."
     assert "1 speech windows returned empty text" in caplog.text
     assert {p.name for p in tmp_path.iterdir()} == {"align.json", "output.srt"}
+
+
+@pytest.mark.parametrize("unexpected", (False, True))
+def test_qwen_publication_failures_return_details_without_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    unexpected: bool,
+) -> None:
+    from src.aligner import AlignmentRecord, write_records
+    from src.transcribe import QwenBatchRunner
+
+    audio = tmp_path / "audio.wav"
+    audio.touch()
+    task = TranscriptionTask(audio, tmp_path / "output.srt")
+
+    def complete_stage(pending, stage, *args, **kwargs):
+        for directory in pending.values():
+            if unexpected:
+                (directory / "align.json").write_text("invalid JSON")
+            else:
+                write_records(
+                    directory / "align.json",
+                    [AlignmentRecord(segment_id="w1", start=0, end=16000, text="x", error="invalid-span")],
+                )
+        return pending, []
+
+    monkeypatch.setattr(QwenBatchRunner, "_validate_models", lambda *args: None)
+    monkeypatch.setattr(QwenBatchRunner, "_run_stage_process", staticmethod(complete_stage))
+    failures = QwenBatchRunner().run((task,), None, True, True)
+    assert len(failures) == 1 and failures[0].task == task
+    assert ("Traceback" in failures[0].reason) is unexpected
+    assert ("invalid-span" in failures[0].reason) is not unexpected
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]

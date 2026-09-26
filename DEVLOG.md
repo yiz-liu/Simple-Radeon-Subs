@@ -371,3 +371,22 @@ without progress, and a failing subprocess preserves completed files and
 reports both its stderr and bounded stdout details. The installed vLLM logger
 was exercised through all three engine entry points with model construction
 substituted; GPU inference remains reserved for manual validation.
+
+## 2026-09-26: report Qwen failures once
+
+Qwen workers now store each handled failure in that input's temporary error
+record and leave reporting to the pipeline or standalone transcription CLI.
+Expected transcription failures retain the reason and window range; unexpected
+exceptions retain their traceback and chained cause. Subtitle publication uses
+the same reporting boundary. The coordinator no longer attaches the entire
+batch's output tail to every failed input, which had repeated unrelated errors
+both during stage handling and in the final pipeline summary.
+
+A nonzero worker exit or missing result produces one stage-level diagnostic
+with the return code and bounded stdout tail. Completed records remain usable,
+including when a worker exits unsuccessfully after writing them all. Native
+stderr remains live, and file/window progress is unchanged.
+
+CPU subprocess regressions cover multi-file pipeline and standalone CLI error
+reporting, expected and unexpected exceptions, missing records, worker crashes,
+and completed-record preservation. Publication errors are checked separately.

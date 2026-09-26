@@ -300,8 +300,10 @@ existing boundaries. Model loading precedes the window bars.
 
 Qwen ASR, alignment and translation show project stage messages and inference
 progress. vLLM warnings and errors appear in the terminal as they occur; its
-INFO/DEBUG messages and weight-loading bars are hidden. Failed Qwen stages
-include the worker exit code and a bounded standard-output tail. Runtime output
+INFO/DEBUG messages and weight-loading bars are hidden. Failed Qwen stages also
+report each file's failure once in the final summary, with a traceback for
+unexpected exceptions. A worker crash or missing result produces one stage
+diagnostic with its exit code and captured standard-output tail. Runtime output
 is not retained as log files.
 
 ## Managed Qwen ASR Profile
