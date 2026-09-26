@@ -169,6 +169,12 @@ class AudioExtractor:
                 unit="s",
                 position=progress_position or 0,
                 leave=progress_position is None,
+                bar_format=(
+                    "{l_bar}{bar}| {n:.0f}/{total:.0f} "
+                    "[{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+                    if progress_total is not None
+                    else "{desc}: {n:.0f}{unit} [{elapsed}, {rate_fmt}{postfix}]"
+                ),
             ) as pbar:
                 last_time = 0.0
                 if process.stdout is not None:
